@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meme Coin Tracker - Portfolio Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #0f766e 0%, #0891b2 55%, #075985 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+        }
+        .glass {
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(14px);
+            border: 1px solid rgba(255, 255, 255, 0.6);
+        }
+        .card-hover:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 16px 32px -8px rgba(8, 145, 178, 0.5);
+        }
+        /* Cartes dashboard : flip — même hauteur que les autres, tableau scrollable */
+        .dashboard-flip {
+            min-height: 0;
+        }
+        .dashboard-flip-flipable {
+            perspective: 1600px;
+            perspective-origin: 50% 50%;
+        }
+        .dashboard-flip-flipable .dashboard-flip-inner {
+            position: relative;
+            width: 100%;
+            height: 11rem;
+            min-height: 11rem;
+            max-height: 11rem;
+            transform-style: preserve-3d;
+            transition: transform 1.15s cubic-bezier(0.22, 0.99, 0.26, 1);
+            will-change: transform;
+        }
+        .dashboard-flip-flipable:hover .dashboard-flip-inner {
+            transform: rotateY(180deg);
+        }
+        .dashboard-flip-flipable .dashboard-flip-front,
+        .dashboard-flip-flipable .dashboard-flip-back {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            min-height: 0;
+            backface-visibility: hidden;
+            -webkit-backface-visibility: hidden;
+            overflow: hidden;
+            transition: opacity 0.55s ease, box-shadow 0.55s ease;
+        }
+        .dashboard-flip-flipable .dashboard-flip-front {
+            opacity: 1;
+        }
+        .dashboard-flip-flipable:hover .dashboard-flip-front {
+            opacity: 0.88;
+        }
+        .dashboard-flip-flipable .dashboard-flip-back {
+            transform: rotateY(180deg);
+            background: rgba(255, 255, 255, 0.78) !important;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.65);
+            box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.06);
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+        .dashboard-flip-flipable:hover .dashboard-flip-back {
+            opacity: 1;
+        }
+        /* Aperçu verso petite carte : scroll sans barres visibles (molette / tactile OK) */
+        .dashboard-flip-preview-scroll {
+            flex: 1 1 0%;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+        .dashboard-flip-preview-scroll::-webkit-scrollbar {
+            width: 0;
+            height: 0;
+            display: none;
+        }
+        .dashboard-flip-flipable.dash-hero-flip .dashboard-flip-inner {
+            height: 14rem;
+            min-height: 14rem;
+            max-height: 14rem;
+        }
+        .dash-hero-card {
+            background: linear-gradient(145deg, rgba(255,255,255,0.95) 0%, rgba(254, 252, 232, 0.92) 100%);
+        }
+        #dashboard, #tokens-grid { transition: opacity 0.12s ease-out; }
+        .animate-pulse-slow {
+            animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        .btn-teal {
+            background: linear-gradient(135deg, #0d9488, #0369a1);
+            color: white;
+        }
+        .btn-teal:hover { filter: brightness(1.12); }
+        .btn-mint {
+            background: linear-gradient(135deg, #059669, #0d9488);
+            color: white;
+        }
+        .btn-mint:hover { filter: brightness(1.12); }
+        .btn-rose {
+            background: linear-gradient(135deg, #fda4af, #fb7185);
+            color: white;
+        }
+        .header-gradient {
+            background: linear-gradient(135deg, #0d9488, #0e7490);
+            border: 1px solid rgba(6,182,212,0.35);
+        }
+        .table-header-teal {
+            background: linear-gradient(135deg, #0d9488, #0891b2);
+            color: white;
+        }
+        input:focus, textarea:focus {
+            outline: none;
+            ring-color: #0891b2;
+            border-color: #0891b2 !important;
+            box-shadow: 0 0 0 3px rgba(8,145,178,0.35);
+        }
+        #first-load-overlay {
+            transition: opacity 0.4s ease-out;
+        }
+        #first-load-overlay.fade-out { opacity: 0; pointer-events: none; }
+        .ephemeral-stat-item {
+            animation: fadeIn 0.3s ease-out;
+        }
+        .ephemeral-fade-out { opacity: 0; transition: opacity 0.5s; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+        #global-loading-bar { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 9999; }
+    </style>
+</head>
+<body>
+    <!-- Barre de chargement globale (toujours visible pendant tout chargement) -->
+    <div id="global-loading-bar" class="hidden bg-gray-200 overflow-hidden">
+        <div id="global-loading-bar-fill" class="h-full bg-gradient-to-r from-teal-500 to-cyan-500 transition-all duration-300" style="width: 0%"></div>
+    </div>
+    <!-- Overlay première connexion : présentation + explication + visuels + barre de chargement -->
+    <div id="first-load-overlay" class="hidden fixed inset-0 z-[100] overflow-y-auto bg-gradient-to-br from-cyan-950 via-teal-900 to-cyan-950">
+        <div class="min-h-screen flex flex-col items-center justify-center py-12 px-4">
+            <!-- Logo et titre -->
+            <div class="text-center mb-8">
+                <div class="inline-flex items-center justify-center w-24 h-24 rounded-2xl bg-gradient-to-br from-cyan-400 to-teal-500 text-5xl mb-4 shadow-lg shadow-cyan-500/30">
+                    &#x1FA99;
+                </div>
+                <h2 class="text-3xl font-bold text-white mb-2">Meme Coin Tracker</h2>
+                <p class="text-cyan-300 text-lg">Votre portfolio Solana en un coup d&apos;œil</p>
+            </div>
+
+            <!-- Explication du but de l'app -->
+            <div class="max-w-xl mx-auto mb-8 px-6 py-5 rounded-2xl bg-white/5 border border-cyan-500/20 backdrop-blur">
+                <h3 class="text-lg font-semibold text-cyan-200 mb-3 flex items-center gap-2">
+                    <i class="fas fa-bullseye text-cyan-400"></i> À quoi sert cette app ?
+                </h3>
+                <p class="text-cyan-100/90 text-sm leading-relaxed">
+                    Meme Coin Tracker analyse votre wallet Solana et importe automatiquement vos achats et ventes de tokens. 
+                    Il calcule vos gains et pertes en <strong class="text-cyan-200">HIFO</strong>, affiche vos graphiques d&apos;évolution 
+                    et synchronise les prix en temps réel via <strong class="text-cyan-200">Helius</strong>.
+                </p>
+            </div>
+
+            <!-- Blocs personnalité -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-2xl mb-8">
+                <div class="rounded-xl bg-white/5 border border-cyan-500/20 p-4 text-center">
+                    <div class="h-12 flex items-center justify-center mb-2">
+                        <i class="fas fa-chart-line text-3xl text-cyan-400/80"></i>
+                    </div>
+                    <p class="text-cyan-300 text-xs font-medium">Voir où ça monte</p>
+                </div>
+                <div class="rounded-xl bg-white/5 border border-cyan-500/20 p-4 text-center">
+                    <div class="h-12 flex items-center justify-center mb-2">
+                        <i class="fas fa-chart-pie text-3xl text-cyan-400/80"></i>
+                    </div>
+                    <p class="text-cyan-300 text-xs font-medium">Où tu mets ton SOL</p>
+                </div>
+                <div class="rounded-xl bg-white/5 border border-cyan-500/20 p-4 text-center">
+                    <div class="h-12 flex items-center justify-center mb-2">
+                        <i class="fas fa-coins text-3xl text-amber-400/80"></i>
+                    </div>
+                    <p class="text-cyan-300 text-xs font-medium">Prix live</p>
+                </div>
+                <div class="rounded-xl bg-white/5 border border-cyan-500/20 p-4 text-center">
+                    <div class="h-12 flex items-center justify-center mb-2">
+                        <i class="fas fa-rocket text-3xl text-emerald-400/80"></i>
+                    </div>
+                    <p class="text-cyan-300 text-xs font-medium">Tout en un</p>
+                </div>
+            </div>
+
+            <!-- Message temps d'attente (plus gros) -->
+            <div class="max-w-lg mx-auto mb-6 px-4">
+                <p class="text-cyan-400/90 text-base font-medium text-center">
+                    💡 Ça peut prendre du temps — mais c&apos;est normal.
+                </p>
+                <p class="text-cyan-400/70 text-sm text-center mt-1">
+                    L&apos;import peut durer 1 à 2 minutes pour les gros wallets.
+                </p>
+            </div>
+
+            <!-- Barre de progression -->
+            <div class="w-full max-w-md mx-auto mb-4">
+                <div class="h-2.5 bg-cyan-900/50 rounded-full overflow-hidden shadow-inner">
+                    <div id="first-load-progress-bar" class="h-full bg-gradient-to-r from-cyan-400 via-teal-400 to-cyan-400 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+                <p id="first-load-step" class="text-cyan-300 text-sm mt-3 text-center">Connexion au serveur...</p>
+                <p id="first-load-eta" class="hidden text-cyan-400/85 text-xs mt-2 text-center font-medium"></p>
+            </div>
+            <div id="ephemeral-stats" class="space-y-2 min-h-[50px] text-center text-cyan-200/80 text-sm max-w-md"></div>
+            <!-- Bouton annuler pendant le chargement -->
+            <button id="cancel-load-btn" type="button" class="mt-6 px-6 py-3 rounded-xl border border-rose-500/50 text-rose-300 hover:bg-rose-500/20 hover:text-rose-200 transition-all font-medium text-sm">
+                <i class="fas fa-times mr-2"></i>Annuler et revenir à l&apos;accueil
+            </button>
+        </div>
+    </div>
+
+    <div id="app" class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="glass header-gradient rounded-2xl shadow-xl p-6 mb-8">
+            <div class="flex justify-between items-center flex-wrap gap-4">
+                <div>
+                    <h1 class="text-4xl font-bold text-white drop-shadow">
+                        &#x1FA99; Meme Coin Tracker
+                    </h1>
+                    <p class="text-cyan-100 mt-1 font-medium">Gestionnaire professionnel d&apos;investissements</p>
+                </div>
+                <div id="wallet-section" class="flex items-center gap-3 flex-wrap flex-col sm:flex-row sm:items-end">
+                    <div id="auth-bar" class="flex flex-wrap items-center gap-2 p-2 rounded-xl bg-cyan-900/40 border border-cyan-600/30 w-full sm:w-auto">
+                        <div id="auth-logged-out" class="flex flex-wrap items-center gap-2">
+                            <input type="text" id="auth-username" autocomplete="username" placeholder="Pseudo" class="px-3 py-2 rounded-lg font-mono text-sm border border-cyan-600/50 bg-white/90 w-28 sm:w-32 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-300">
+                            <input type="password" id="auth-password" autocomplete="current-password" placeholder="Mot de passe" class="px-3 py-2 rounded-lg font-mono text-sm border border-cyan-600/50 bg-white/90 w-32 sm:w-36 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-300">
+                            <button type="button" id="auth-login-btn" class="bg-cyan-700 hover:bg-cyan-600 text-white px-3 py-2 rounded-lg text-sm font-semibold transition-all">Connexion</button>
+                            <button type="button" id="auth-register-btn" class="bg-violet-700 hover:bg-violet-600 text-white px-3 py-2 rounded-lg text-sm font-semibold transition-all">Créer un compte</button>
+                        </div>
+                        <div id="auth-logged-in" class="hidden flex flex-wrap items-center gap-2">
+                            <span class="text-cyan-100 text-sm font-semibold"><i class="fas fa-user mr-1 opacity-80"></i><span id="auth-display-name"></span></span>
+                            <button type="button" id="nav-my-addresses-btn" class="text-xs bg-teal-700 hover:bg-teal-600 text-white px-3 py-1.5 rounded-lg font-medium transition-all" title="Gérer les adresses, libellés et synchro chaîne">
+                                <i class="fas fa-address-book mr-1"></i>Mes adresses
+                            </button>
+                            <button type="button" id="nav-back-dashboard-btn" class="hidden text-xs bg-cyan-800 hover:bg-cyan-700 text-white px-3 py-1.5 rounded-lg font-medium transition-all">
+                                <i class="fas fa-chart-pie mr-1"></i>Dashboard
+                            </button>
+                            <button type="button" id="auth-logout-btn" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg font-medium transition-all">Déconnexion</button>
+                        </div>
+                    </div>
+                    <select id="saved-wallets-select" class="hidden px-3 py-3 border-2 border-cyan-700 rounded-xl font-mono text-sm bg-white/90 focus:border-cyan-400 max-w-xs" title="Adresses enregistrées sur votre compte">
+                        <option value="">— Mes adresses —</option>
+                    </select>
+                    <input type="text" id="wallet-input" placeholder="Adresse wallet Solana..." class="px-4 py-3 border-2 border-cyan-700 rounded-xl font-mono text-sm focus:border-cyan-400 bg-white/90" style="min-width: 280px;">
+                    <button id="validate-wallet" class="btn-teal px-5 py-3 rounded-xl font-semibold shadow transition-all">
+                        <i class="fas fa-check mr-2"></i>Valider
+                    </button>
+                    <span class="text-teal-400 font-medium">ou</span>
+                    <button id="connect-wallet" class="btn-teal px-5 py-3 rounded-xl font-semibold shadow transition-all">
+                        <i class="fas fa-wallet mr-2"></i>Phantom
+                    </button>
+                    <button id="refresh-prices" class="bg-sky-700 text-white px-5 py-3 rounded-xl font-semibold hover:bg-sky-600 transition-all shadow">
+                        <i class="fas fa-sync-alt mr-2"></i>Actualiser
+                    </button>
+                    <button id="recalculate-history" class="bg-violet-700 text-white px-5 py-3 rounded-xl font-semibold hover:bg-violet-600 transition-all shadow" title="Enregistre en base le PnL HIFO de chaque vente (figé). Le latent sur les tokens non vendus évolue déjà avec les prix — ce bouton sert surtout après import, nouvelle vente, ou si le dashboard demande un recalcul.">
+                        <i class="fas fa-history mr-2"></i>Recalculer HIFO
+                    </button>
+                </div>
+            </div>
+            <div id="wallet-info" class="mt-4 hidden">
+                <div class="bg-cyan-800 border border-cyan-500 rounded-lg p-3 flex items-center justify-between gap-4">
+                    <p class="text-white"><i class="fas fa-check-circle mr-2 text-cyan-200"></i>Connect&eacute;: <span id="wallet-address" class="font-mono text-sm text-cyan-100"></span></p>
+                    <button id="change-wallet" class="text-xs bg-rose-500 hover:bg-rose-600 text-white px-3 py-1 rounded-lg font-semibold transition-all">
+                        <i class="fas fa-times mr-1"></i>Changer
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Gestion des adresses (compte connecté) -->
+        <div id="addresses-page" class="hidden mb-8">
+            <div class="glass rounded-2xl shadow-xl p-6 md:p-8 border border-teal-200/40">
+                <h2 class="text-2xl font-bold text-teal-900 mb-2"><i class="fas fa-address-book mr-2 text-teal-600"></i>Mes adresses suivies</h2>
+                <p class="text-teal-700 text-sm mb-6 max-w-3xl leading-relaxed">
+                    Chaque adresse est liée à votre compte. Donnez un <strong>nom</strong> pour la retrouver plus vite.
+                    Le suivi dans la liste déroulante utilise uniquement les adresses marquées « Suivie ».
+                    <strong>Aucune synchronisation automatique</strong> de toutes les adresses : utilisez <strong>Actualiser la chaîne</strong> sur la ligne voulue (ou le bouton « Actualiser » du dashboard pour l’adresse affichée).
+                </p>
+                <div id="addresses-page-content" class="text-teal-800 text-sm">Chargement…</div>
+            </div>
+        </div>
+
+        <!-- Page d'accueil (visible quand aucun wallet) -->
+        <div id="welcome-page" class="mb-8">
+            <div class="glass rounded-3xl shadow-2xl overflow-hidden">
+                <div class="p-12 md:p-16 text-center">
+                    <div class="inline-flex items-center justify-center w-24 h-24 rounded-full bg-gradient-to-br from-teal-400 to-cyan-600 text-white text-5xl mb-6 shadow-lg">
+                        &#x1FA99;
+                    </div>
+                    <h2 class="text-3xl md:text-4xl font-bold text-teal-800 mb-4">Bienvenue sur Meme Coin Tracker</h2>
+                    <p class="text-teal-600 text-lg max-w-xl mx-auto mb-4">
+                        Suivez vos investissements en meme coins sur Solana. Connectez votre wallet pour accéder à votre portfolio, vos gains/pertes et l&apos;historique de vos transactions.
+                    </p>
+                    <p class="text-teal-500 text-sm max-w-lg mx-auto mb-8">
+                        <i class="fas fa-user-circle mr-1"></i><strong>Compte (optionnel)</strong> : en haut à droite, créez un compte avec un pseudo et un mot de passe pour enregistrer plusieurs adresses et retrouver la dernière utilisée sur cet appareil.
+                    </p>
+                    <div class="flex flex-col sm:flex-row gap-4 justify-center items-center mb-10">
+                        <div class="flex items-center gap-3 bg-white/80 rounded-xl px-6 py-4 shadow-md border border-teal-100">
+                            <input type="text" id="welcome-wallet-input" placeholder="Collez votre adresse Solana..." class="px-4 py-2 border border-teal-200 rounded-lg font-mono text-sm w-72 focus:border-cyan-400 focus:ring-2 focus:ring-cyan-200">
+                            <button id="welcome-validate" class="btn-teal px-5 py-2.5 rounded-lg font-semibold shadow transition-all whitespace-nowrap">
+                                <i class="fas fa-arrow-right mr-2"></i>Commencer
+                            </button>
+                        </div>
+                        <span class="text-teal-500 font-medium">ou</span>
+                        <button id="welcome-phantom" class="btn-teal px-8 py-4 rounded-xl font-semibold shadow-lg transition-all hover:scale-105">
+                            <i class="fas fa-wallet mr-2"></i>Connecter Phantom
+                        </button>
+                    </div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-3xl mx-auto text-left">
+                        <div class="bg-white/60 rounded-xl p-4 border border-teal-100">
+                            <div class="text-2xl mb-2">&#x1F4C8;</div>
+                            <p class="font-semibold text-teal-700">Graphiques</p>
+                            <p class="text-sm text-teal-500">Évolution du portfolio et gains</p>
+                        </div>
+                        <div class="bg-white/60 rounded-xl p-4 border border-teal-100">
+                            <div class="text-2xl mb-2">&#x1F4B0;</div>
+                            <p class="font-semibold text-teal-700">Prix temps réel</p>
+                            <p class="text-sm text-teal-500">Synchronisation Helius</p>
+                        </div>
+                        <div class="bg-white/60 rounded-xl p-4 border border-teal-100">
+                            <div class="text-2xl mb-2">&#x1F4DC;</div>
+                            <p class="font-semibold text-teal-700">Historique HIFO</p>
+                            <p class="text-sm text-teal-500">Gains/pertes précis</p>
+                        </div>
+                        <div class="bg-white/60 rounded-xl p-4 border border-teal-100">
+                            <div class="text-2xl mb-2">&#x1F310;</div>
+                            <p class="font-semibold text-teal-700">Blockchain</p>
+                            <p class="text-sm text-teal-500">Import swaps automatique</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Contenu principal (visible quand wallet connecté) -->
+        <div id="main-content" class="hidden">
+        <!-- Barre de progression (chargement progressif) -->
+        <div id="sync-progress-container" class="hidden mb-6">
+            <div class="glass rounded-xl p-4 shadow-lg">
+                <div class="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                    <span id="sync-progress-label" class="text-teal-700 font-medium min-w-0">Chargement...</span>
+                    <span id="sync-progress-pct" class="text-teal-600 font-bold shrink-0">0%</span>
+                </div>
+                <p id="sync-progress-eta" class="hidden text-xs text-teal-600/90 mb-2 font-medium"></p>
+                <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                    <div id="sync-progress-bar" class="bg-gradient-to-r from-teal-500 to-cyan-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+                <button id="cancel-load-btn-bar" type="button" class="mt-3 w-full py-2 rounded-lg border border-rose-300 text-rose-600 hover:bg-rose-50 font-medium text-sm transition-all">
+                    <i class="fas fa-times mr-2"></i>Annuler
+                </button>
+            </div>
+        </div>
+
+        <!-- Dashboard Stats -->
+        <div id="dashboard" class="flex flex-col gap-6 lg:grid lg:grid-cols-12 lg:gap-6 mb-6 items-stretch">
+            <!-- Stats cards will be injected here -->
+        </div>
+
+        <!-- Cartes Envois & Reçus (chargées automatiquement) -->
+        <div id="transfers-summary" class="hidden mb-8">
+            <h2 class="text-2xl font-bold text-white mb-4 drop-shadow">&#x21C4; Flux de l&apos;adresse</h2>
+            <div id="transfers-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"></div>
+        </div>
+
+        <!-- Add Token Button -->
+        <div class="mb-6 flex justify-between items-center">
+            <h2 class="text-3xl font-bold text-white drop-shadow">Mes Tokens</h2>
+            <button id="add-token-btn" class="btn-mint px-6 py-3 rounded-xl font-semibold shadow-lg transition-all">
+                <i class="fas fa-plus mr-2"></i>Ajouter un Token
+            </button>
+        </div>
+
+        <!-- Tokens Cards -->
+        <div id="tokens-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
+            <!-- Token cards will be injected here -->
+        </div>
+
+        <!-- Charts Section (génération à la demande — au-dessus de l’historique des transactions) -->
+        <div class="glass rounded-2xl shadow-xl p-6 card-hover transition-all mb-8" id="charts-section">
+            <div class="flex flex-wrap items-center gap-3 mb-5 p-3 rounded-xl bg-teal-50/60 border border-teal-100/80">
+                <label for="chart-period-select" class="text-sm font-semibold text-teal-800 whitespace-nowrap">
+                    P&eacute;riode des graphiques d&apos;&eacute;volution
+                </label>
+                <select id="chart-period-select" class="text-sm border border-teal-200 rounded-lg px-3 py-2 bg-white text-teal-900 font-medium min-w-[12rem] shadow-sm focus:ring-2 focus:ring-teal-400 focus:border-teal-400 outline-none">
+                    <option value="all">Tout (depuis le d&eacute;but)</option>
+                    <option value="1">1 jour</option>
+                    <option value="7">1 semaine</option>
+                    <option value="365">1 an</option>
+                </select>
+                <span class="text-xs text-teal-600/90 max-w-xl leading-snug">
+                    S&apos;applique au gain net et &agrave; l&apos;&eacute;volution du portfolio (tokens de l&apos;adresse ; origine = plus ancienne activit&eacute; connue en base, pas &agrave; la r&eacute;partition).
+                </span>
+            </div>
+            <h3 class="text-2xl font-bold mb-1 text-teal-700">&#x1F4C8; &Eacute;volution du gain net (portefeuille)</h3>
+            <p class="text-sm text-teal-600/90 mb-4 max-w-3xl leading-snug">
+                M&ecirc;me m&eacute;trique que le &laquo; R&eacute;sultat net &raquo; du tableau de bord (somme des gains &minus; somme des pertes par token, hors wSOL).
+                Les points viennent de la base (un point &agrave; chaque actualisation des prix). Au premier chargement d&apos;une adresse, le graphique n&apos;est pas calcul&eacute; tant que vous ne cliquez pas ci-dessous.
+            </p>
+            <div id="gains-chart-lazy" class="rounded-xl border border-dashed border-teal-200/80 bg-teal-50/40 p-8 text-center">
+                <p class="text-sm text-teal-800/85 mb-4 max-w-xl mx-auto leading-snug">
+                    &Eacute;vite un chargement long au premier import. Une fois g&eacute;n&eacute;r&eacute;, ce graphique se met &agrave; jour automatiquement apr&egrave;s &laquo; Actualiser &raquo; (nouveau point en base).
+                </p>
+                <button type="button" id="gains-chart-generate-btn" class="px-5 py-2.5 rounded-xl bg-teal-600 text-white font-semibold hover:bg-teal-500 shadow transition">
+                    <i class="fas fa-chart-line mr-2"></i>G&eacute;n&eacute;rer le graphique
+                </button>
+            </div>
+            <canvas id="gainsChart" class="hidden w-full max-h-[420px]"></canvas>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+            <div class="glass rounded-2xl shadow-xl p-6 card-hover transition-all">
+                <h3 class="text-2xl font-bold mb-4 text-teal-700">&#x1F4C8; &Eacute;volution du Portfolio</h3>
+                <div id="portfolio-chart-lazy" class="rounded-xl border border-dashed border-teal-200/80 bg-teal-50/40 p-8 text-center min-h-[200px] flex flex-col items-center justify-center">
+                    <p class="text-sm text-teal-800/85 mb-4">Historique agr&eacute;g&eacute; des prix en base. G&eacute;n&eacute;ration sur demande.</p>
+                    <button type="button" id="portfolio-chart-generate-btn" class="px-5 py-2.5 rounded-xl bg-teal-600 text-white font-semibold hover:bg-teal-500 shadow transition">
+                        <i class="fas fa-chart-area mr-2"></i>G&eacute;n&eacute;rer le graphique
+                    </button>
+                </div>
+                <canvas id="portfolioChart" class="hidden w-full max-h-[360px]"></canvas>
+            </div>
+            <div class="glass rounded-2xl shadow-xl p-6 card-hover transition-all">
+                <h3 class="text-2xl font-bold mb-4 text-teal-700">&#x1F3AF; R&eacute;partition des Investissements</h3>
+                <div id="distribution-chart-lazy" class="rounded-xl border border-dashed border-teal-200/80 bg-teal-50/40 p-8 text-center min-h-[200px] flex flex-col items-center justify-center">
+                    <p class="text-sm text-teal-800/85 mb-4">R&eacute;partition des montants investis (tokens actifs). G&eacute;n&eacute;ration sur demande.</p>
+                    <button type="button" id="distribution-chart-generate-btn" class="px-5 py-2.5 rounded-xl bg-teal-600 text-white font-semibold hover:bg-teal-500 shadow transition">
+                        <i class="fas fa-chart-pie mr-2"></i>G&eacute;n&eacute;rer le graphique
+                    </button>
+                </div>
+                <canvas id="distributionChart" class="hidden w-full max-h-[360px]"></canvas>
+            </div>
+        </div>
+
+        <!-- Transactions/Ventes Section -->
+        <div class="mb-8">
+            <h2 class="text-3xl font-bold text-white mb-6 drop-shadow">&#x1F4DC; Historique des Transactions</h2>
+            <div class="glass rounded-2xl shadow-xl overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="table-header-teal">
+                            <tr>
+                                <th class="px-4 py-4 text-left font-semibold">Date</th>
+                                <th class="px-4 py-4 text-left font-semibold">Type</th>
+                                <th class="px-4 py-4 text-left font-semibold">Token</th>
+                                <th class="px-4 py-4 text-right font-semibold">Quantité</th>
+                                <th class="px-4 py-4 text-right font-semibold">Prix unitaire</th>
+                                <th class="px-4 py-4 text-right font-semibold">Montant Total</th>
+                                <th class="px-4 py-4 text-right font-semibold">Gain / Perte</th>
+                            </tr>
+                        </thead>
+                        <tbody id="transactions-body">
+                            <tr>
+                                <td colspan="7" class="text-center py-8 text-gray-400">
+                                    <i class="fas fa-history text-4xl mb-4 block text-teal-200"></i>
+                                    <p>Aucune transaction pour le moment</p>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════ -->
+        <!-- Section Blockchain / Helius Live                   -->
+        <!-- ═══════════════════════════════════════════════ -->
+        <div class="mb-8">
+            <h2 class="text-3xl font-bold text-white mb-6 drop-shadow">&#x26D3;&#xFE0F; Blockchain en direct <span class="text-sm font-normal text-cyan-200 ml-2">(via Helius)</span></h2>
+            <div class="glass rounded-2xl shadow-xl p-6">
+
+                <!-- Boutons actions -->
+                <div class="flex flex-wrap gap-3 mb-6">
+                    <button id="btn-helius-balances" onclick="heliusBalances()"
+                        class="flex items-center gap-2 px-5 py-3 rounded-xl font-semibold shadow transition-all"
+                        style="background:linear-gradient(135deg,#7c3aed,#4f46e5);color:white">
+                        <i class="fas fa-wallet"></i> Mes soldes live
+                    </button>
+                    <button id="btn-helius-activity" onclick="heliusActivity()"
+                        class="flex items-center gap-2 px-5 py-3 rounded-xl font-semibold shadow transition-all"
+                        style="background:linear-gradient(135deg,#0891b2,#0369a1);color:white">
+                        <i class="fas fa-stream"></i> Activit&eacute; r&eacute;cente
+                    </button>
+                    <button id="btn-helius-import" onclick="heliusImportSwaps()"
+                        class="flex items-center gap-2 px-5 py-3 rounded-xl font-semibold shadow transition-all"
+                        style="background:linear-gradient(135deg,#059669,#0d9488);color:white">
+                        <i class="fas fa-file-import"></i> Importer mes swaps &rarr; BDD
+                    </button>
+                    <button id="btn-helius-txs" onclick="heliusTransactions()"
+                        class="flex items-center gap-2 px-5 py-3 rounded-xl font-semibold shadow transition-all"
+                        style="background:linear-gradient(135deg,#d97706,#b45309);color:white">
+                        <i class="fas fa-list-alt"></i> Toutes les transactions
+                    </button>
+                    <button id="btn-helius-transfers" onclick="heliusTransfers()"
+                        class="flex items-center gap-2 px-5 py-3 rounded-xl font-semibold shadow transition-all"
+                        style="background:linear-gradient(135deg,#7c3aed,#be185d);color:white">
+                        <i class="fas fa-exchange-alt"></i> Envois &amp; Re&ccedil;us
+                    </button>
+                </div>
+
+                <!-- Zone résultat -->
+                <div id="helius-result" class="hidden">
+                    <div id="helius-loading" class="hidden text-center py-8">
+                        <i class="fas fa-spinner fa-spin text-4xl text-teal-400 mb-3"></i>
+                        <p class="text-teal-600 font-medium">Connexion Helius en cours...</p>
+                    </div>
+                    <div id="helius-content"></div>
+                </div>
+
+                <!-- Message si pas de wallet -->
+                <p id="helius-no-wallet" class="hidden text-rose-500 font-semibold">
+                    <i class="fas fa-exclamation-triangle mr-2"></i>
+                    Connectez d&apos;abord votre wallet (champ en haut) pour utiliser cette fonctionnalit&eacute;.
+                </p>
+            </div>
+        </div>
+        </div>
+        <!-- Fin main-content -->
+
+        <!-- Modal transactions par carte dashboard (Gains, Pertes, etc.) -->
+        <div id="dashboard-tx-modal" class="fixed inset-0 bg-cyan-950 bg-opacity-70 hidden flex items-center justify-center z-50 p-3 sm:p-4">
+            <div class="glass rounded-2xl p-5 sm:p-7 w-full max-w-[min(1280px,96vw)] h-[min(92vh,calc(100vh-2rem))] max-h-[min(92vh,calc(100vh-2rem))] overflow-hidden flex flex-col min-h-0 shadow-2xl">
+                <div class="flex justify-between items-center mb-4 shrink-0">
+                    <div>
+                        <h3 class="text-2xl font-bold text-teal-800" id="dashboard-tx-modal-title">Transactions</h3>
+                        <p class="text-sm text-teal-500 mt-1" id="dashboard-tx-modal-subtitle"></p>
+                    </div>
+                    <button onclick="closeDashboardTxModal()" class="text-gray-400 hover:text-gray-600 p-2 -mr-2">
+                        <i class="fas fa-times text-2xl"></i>
+                    </button>
+                </div>
+                <div id="dashboard-tx-summary" class="grid grid-cols-3 gap-3 mb-4 shrink-0"></div>
+                <div class="flex-1 min-h-0 overflow-y-auto overflow-x-auto rounded-xl border border-teal-100/60 bg-white/40">
+                    <table class="w-full min-w-[860px] text-base leading-snug">
+                        <thead class="sticky top-0 bg-white/95 backdrop-blur-md z-[1] shadow-sm">
+                            <tr class="text-gray-600 border-b-2 border-teal-100">
+                                <th class="text-left py-3.5 px-2 sm:px-3 font-semibold">Date</th>
+                                <th class="text-left py-3.5 px-2 sm:px-3 font-semibold">Type</th>
+                                <th class="text-left py-3.5 px-2 sm:px-3 font-semibold">Token</th>
+                                <th class="text-right py-3.5 px-2 sm:px-3 font-semibold">Quantité</th>
+                                <th class="text-right py-3.5 px-2 sm:px-3 font-semibold">Prix unitaire</th>
+                                <th class="text-right py-3.5 px-2 sm:px-3 font-semibold">Montant total</th>
+                                <th class="text-right py-3.5 px-2 sm:px-3 font-semibold">Gain / Perte</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dashboard-tx-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Total dépensé manuel (fixe jusqu’à modification ou dépôt) -->
+        <div id="reference-capital-modal" class="fixed inset-0 bg-cyan-950 bg-opacity-70 hidden flex items-center justify-center z-50 p-3">
+            <div class="glass rounded-2xl p-6 max-w-md w-full shadow-2xl border border-teal-100/60 max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-start mb-4">
+                    <div>
+                        <h3 class="text-xl font-bold text-teal-800">Total dépensé (USD)</h3>
+                        <p class="text-sm text-teal-600 mt-1 leading-snug">Montant total que vous considérez avoir investi sur ce wallet. Il reste figé tant que vous ne le changez pas ou n’ajoutez pas un dépôt. Les montants en euros : convertissez ou saisissez l’équivalent USD.</p>
+                    </div>
+                    <button type="button" id="reference-capital-close" class="text-gray-400 hover:text-gray-600 p-1" aria-label="Fermer"><i class="fas fa-times text-xl"></i></button>
+                </div>
+                <label class="block text-sm font-medium text-teal-800 mb-1" for="reference-capital-input">Total dépensé (fixer ou remplacer)</label>
+                <input type="number" id="reference-capital-input" min="0" step="0.01" placeholder="ex. 192" class="w-full px-4 py-3 border-2 border-teal-200 rounded-xl font-mono text-lg focus:border-cyan-400 bg-white/95 mb-2">
+                <button type="button" id="reference-capital-fill-patrimoine" class="w-full mb-4 py-2.5 rounded-xl font-semibold bg-sky-100 text-sky-900 hover:bg-sky-200 text-sm">Remplir avec le patrimoine actuel (tokens + SOL)</button>
+                <label class="block text-sm font-medium text-teal-800 mb-1" for="reference-capital-add-input">Ajouter un dépôt (s’ajoute au total)</label>
+                <div class="flex flex-col sm:flex-row gap-2 mb-4">
+                    <input type="number" id="reference-capital-add-input" min="0" step="0.01" placeholder="ex. 50" class="flex-1 min-w-0 px-4 py-3 border-2 border-teal-200 rounded-xl font-mono text-lg focus:border-cyan-400 bg-white/95">
+                    <button type="button" id="reference-capital-add-btn" class="sm:w-40 py-3 rounded-xl font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Ajouter</button>
+                </div>
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <button type="button" id="reference-capital-save" class="btn-teal flex-1 py-3 rounded-xl font-semibold">Enregistrer le total</button>
+                    <button type="button" id="reference-capital-clear" class="flex-1 py-3 rounded-xl font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300">Remettre à 0</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal transactions par token -->
+        <div id="token-tx-modal" class="fixed inset-0 bg-cyan-950 bg-opacity-70 hidden flex items-center justify-center z-50">
+            <div class="glass rounded-2xl p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
+                <div class="flex justify-between items-center mb-4">
+                    <div>
+                        <h3 class="text-xl font-bold text-teal-700" id="token-tx-modal-title">Transactions</h3>
+                        <p class="text-xs text-teal-400 mt-0.5" id="token-tx-modal-subtitle"></p>
+                    </div>
+                    <button onclick="closeTokenTxModal()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-2xl"></i>
+                    </button>
+                </div>
+                <!-- Résumé HIFO -->
+                <div id="token-tx-summary" class="grid grid-cols-3 gap-3 mb-4"></div>
+                <!-- Tableau -->
+                <div class="overflow-y-auto flex-1">
+                    <table class="w-full text-sm">
+                        <thead class="sticky top-0 bg-white/80 backdrop-blur">
+                            <tr class="text-gray-500 border-b border-teal-100">
+                                <th class="text-left py-2 pr-3">Date</th>
+                                <th class="text-left py-2 pr-3">Type</th>
+                                <th class="text-right py-2 pr-3">Quantité</th>
+                                <th class="text-right py-2 pr-3">Prix unitaire</th>
+                                <th class="text-right py-2 pr-3">Montant total</th>
+                                <th class="text-right py-2">Gain / Perte</th>
+                            </tr>
+                        </thead>
+                        <tbody id="token-tx-body">
+                            <tr><td colspan="6" class="text-center py-8 text-gray-400">Chargement…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal graphique prix / P&amp;L par token -->
+        <div id="token-chart-modal" class="fixed inset-0 bg-cyan-950 bg-opacity-70 hidden flex items-center justify-center z-50 p-3 sm:p-4" onclick="if (event.target === this) closeTokenChartModal()">
+            <div class="glass rounded-2xl p-5 sm:p-7 w-full max-w-4xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl" onclick="event.stopPropagation()">
+                <div class="flex justify-between items-start gap-3 mb-3 shrink-0">
+                    <div class="min-w-0">
+                        <h3 class="text-xl sm:text-2xl font-bold text-teal-800" id="token-chart-modal-title">Graphique</h3>
+                        <p class="text-sm text-teal-600 mt-1" id="token-chart-modal-subtitle"></p>
+                        <p class="text-xs text-slate-500 mt-2 leading-snug max-w-2xl" id="token-chart-modal-note"></p>
+                    </div>
+                    <button type="button" onclick="closeTokenChartModal()" class="text-gray-400 hover:text-gray-600 p-2 shrink-0" title="Fermer">
+                        <i class="fas fa-times text-2xl"></i>
+                    </button>
+                </div>
+                <div class="flex-1 min-h-[240px] max-h-[min(70vh,520px)] relative w-full">
+                    <canvas id="token-detail-chart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal for Add/Edit Token -->
+        <div id="token-modal" class="fixed inset-0 bg-cyan-950 bg-opacity-70 hidden flex items-center justify-center z-50">
+            <div class="glass rounded-2xl p-8 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-2xl font-bold text-teal-700" id="modal-title">Ajouter un Token</h3>
+                    <button id="close-modal" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-2xl"></i>
+                    </button>
+                </div>
+                <form id="token-form" class="space-y-4">
+                    <input type="hidden" id="token-id">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">Nom du Token *</label>
+                            <input type="text" id="token-name" required class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">&Eacute;v&eacute;nement</label>
+                            <input type="text" id="token-event" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-teal-700 mb-2">Adresse Solana *</label>
+                        <input type="text" id="token-address" required class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80 font-mono text-sm">
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">Date d&apos;achat</label>
+                            <input type="date" id="token-purchase-date" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">Tokens achet&eacute;s</label>
+                            <input type="number" step="any" id="token-purchased" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">Prix d&apos;achat (USD)</label>
+                            <input type="number" step="any" id="token-price" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">MCAP cible</label>
+                            <input type="text" id="token-mcap" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-teal-700 mb-2">Date de d&eacute;tection</label>
+                            <input type="date" id="token-detection" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-teal-700 mb-2">Commentaires</label>
+                        <textarea id="token-comments" rows="3" class="w-full px-4 py-2 border border-teal-200 rounded-lg bg-white/80"></textarea>
+                    </div>
+                    <div class="flex gap-4 mt-6">
+                        <button type="submit" class="flex-1 btn-teal px-6 py-3 rounded-lg font-semibold shadow transition-all">
+                            <i class="fas fa-save mr-2"></i>Enregistrer
+                        </button>
+                        <button type="button" id="cancel-modal" class="flex-1 bg-rose-100 text-rose-600 px-6 py-3 rounded-lg font-semibold hover:bg-rose-200 transition-all">
+                            Annuler
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="api-config.js?v=1"></script>
+    <script src="app.js?v=19"></script>
+</body>
+</html>

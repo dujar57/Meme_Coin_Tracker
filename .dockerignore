@@ -1,0 +1,12 @@
+# Contexte Docker (Render « Docker » ou local)
+.git
+**/__pycache__
+**/.pytest_cache
+**/.venv
+**/venv
+backend/.env
+.env
+data/*.db
+data/*.db-shm
+data/*.db-wal
+*.md

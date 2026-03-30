@@ -1,0 +1,16 @@
+# Blueprint Render : dépôt Git = ce dossier (meme_coin_tracker).
+# Si la racine du repo est au-dessus, définis rootDir dans le tableau de bord Render.
+services:
+  - type: web
+    name: meme-coin-tracker
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+      - key: HELIUS_API_KEY
+        sync: false

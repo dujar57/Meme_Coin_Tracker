@@ -1,0 +1,16 @@
+# Variables d'environnement (clés API, mots de passe)
+.env
+.env.*
+
+# Base de données locale
+*.db
+*.sqlite
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environnement virtuel
+.venv/
+venv/
