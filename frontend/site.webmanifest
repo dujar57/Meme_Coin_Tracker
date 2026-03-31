@@ -1,0 +1,17 @@
+{
+  "name": "Meme Coin Tracker",
+  "short_name": "Meme Tracker",
+  "description": "Portfolio Solana — meme coins, HIFO, Helius",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f766e",
+  "theme_color": "#0d9488",
+  "icons": [
+    {
+      "src": "apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

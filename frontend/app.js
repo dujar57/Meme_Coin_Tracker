@@ -1888,8 +1888,8 @@ function renderDashboard(data, txs = []) {
 
         const dashboard = document.getElementById('dashboard');
         dashboard.className = 'flex flex-col gap-6 lg:grid lg:grid-cols-12 lg:gap-6 mb-6 items-stretch';
-        const cardStd = 'glass rounded-xl p-6 shadow-md card-hover transition-all';
-        const flipFront = 'dashboard-flip-front glass rounded-xl p-4 shadow-md card-hover transition-all flex items-center';
+        const cardStd = 'glass rounded-xl p-4 sm:p-6 shadow-md card-hover transition-all';
+        const flipFront = 'dashboard-flip-front glass rounded-xl p-3 sm:p-4 shadow-md card-hover transition-all flex items-center';
         const flipBack = 'dashboard-flip-back glass rounded-xl p-1 shadow-md overflow-hidden';
         const netPos = (data.net_total ?? 0) >= 0;
         dashboard.innerHTML = `
@@ -1900,7 +1900,7 @@ function renderDashboard(data, txs = []) {
                         <div class="flex items-center justify-between">
                             <div>
                                 <p class="text-teal-500 text-sm font-medium">💎 Solde SOL</p>
-                                <p class="text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(solValue)}${_pctOfPatrimoineHtml(solValue, totalPatrimoine)}</p>
+                                <p class="text-2xl sm:text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(solValue)}${_pctOfPatrimoineHtml(solValue, totalPatrimoine)}</p>
                                 <p class="text-xs mt-1 ${solBalanceStale ? 'text-amber-400' : 'text-teal-400'}">
                                     ${solBalance.toFixed(4)} SOL${solBalanceStale ? ' ⚠️ cache' : ''}
                                 </p>
@@ -1916,7 +1916,7 @@ function renderDashboard(data, txs = []) {
                         <div class="flex items-center justify-between">
                             <div class="w-full min-w-0 pr-2">
                                 <p class="text-teal-500 text-sm font-medium">${spentCardTitle}</p>
-                                <p class="text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_risked ?? 0)}${investedForRoi > 0.01 ? '<span class="text-sm font-semibold text-teal-500/80 ml-1">(base des %)</span>' : ''}</p>
+                                <p class="text-2xl sm:text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_risked ?? 0)}${investedForRoi > 0.01 ? '<span class="text-sm font-semibold text-teal-500/80 ml-1">(base des %)</span>' : ''}</p>
                                 <div class="mt-2 space-y-1">
                                     <p class="text-[11px] text-slate-600 leading-snug">${spentCardHelp}</p>
                                     <p class="text-xs text-slate-500">Achats importés (chaîne, info) : ${formatCurrency(trackedPurchasesUsd)}</p>
@@ -1937,7 +1937,7 @@ function renderDashboard(data, txs = []) {
                         <div class="flex items-center justify-between">
                             <div>
                                 <p class="text-teal-500 text-sm font-medium">📊 Valeur Actuelle</p>
-                                <p class="text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.current_amount ?? 0)}${_pctOfInvestedHtml(data.current_amount ?? 0, investedForRoi, 'text-lg font-semibold text-teal-600/90')}</p>
+                                <p class="text-2xl sm:text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.current_amount ?? 0)}${_pctOfInvestedHtml(data.current_amount ?? 0, investedForRoi, 'text-lg font-semibold text-teal-600/90')}</p>
                             </div>
                             <div class="bg-cyan-100 p-4 rounded-full shrink-0">
                                 <i class="fas fa-chart-line text-cyan-500 text-2xl"></i>
@@ -1950,15 +1950,15 @@ function renderDashboard(data, txs = []) {
             <!-- Centre : Total Patrimoine (hero) -->
             <div class="order-1 lg:order-none lg:col-span-6 lg:col-start-4 lg:row-start-1">
                 <div class="dashboard-flip h-full">
-                    <div class="glass dash-hero-card rounded-2xl p-8 shadow-lg card-hover transition-all border border-amber-200/40 h-full min-h-[11rem] flex items-center">
-                        <div class="flex items-center justify-between w-full gap-4">
+                    <div class="glass dash-hero-card rounded-2xl p-5 sm:p-8 shadow-lg card-hover transition-all border border-amber-200/40 h-full min-h-[11rem] flex items-center">
+                        <div class="flex items-center justify-between w-full gap-3 sm:gap-4">
                             <div class="min-w-0 flex-1">
-                                <p class="text-teal-600 text-base font-semibold tracking-wide">👑 Total Patrimoine</p>
-                                <p class="text-4xl lg:text-5xl font-extrabold text-teal-900 mt-2 leading-tight flex flex-wrap items-baseline gap-x-2">${formatCurrency(totalPatrimoine)}${_totalReturnVsInvestedHtml(totalPatrimoine, investedForRoi, 'text-xl lg:text-2xl font-bold text-teal-700/90', patrimoinePctTitle)}</p>
-                                <p class="text-sm text-teal-500 mt-2">Tokens + SOL (valeur marché)</p>
+                                <p class="text-teal-600 text-sm sm:text-base font-semibold tracking-wide">👑 Total Patrimoine</p>
+                                <p class="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-extrabold text-teal-900 mt-2 leading-tight flex flex-wrap items-baseline gap-x-2">${formatCurrency(totalPatrimoine)}${_totalReturnVsInvestedHtml(totalPatrimoine, investedForRoi, 'text-base sm:text-xl lg:text-2xl font-bold text-teal-700/90', patrimoinePctTitle)}</p>
+                                <p class="text-xs sm:text-sm text-teal-500 mt-2">Tokens + SOL (valeur marché)</p>
                             </div>
-                            <div class="bg-amber-100 p-5 rounded-full shrink-0">
-                                <i class="fas fa-crown text-amber-500 text-3xl lg:text-4xl"></i>
+                            <div class="bg-amber-100 p-3 sm:p-5 rounded-full shrink-0">
+                                <i class="fas fa-crown text-amber-500 text-2xl sm:text-3xl lg:text-4xl"></i>
                             </div>
                         </div>
                     </div>
@@ -1971,9 +1971,9 @@ function renderDashboard(data, txs = []) {
                     <div class="${flipFront} hover:ring-2 hover:ring-teal-400/50 min-h-0 h-full border border-teal-200/30">
                         <div class="flex items-center justify-between w-full gap-3 px-2">
                             <div>
-                                <p class="text-teal-600 text-base font-semibold">✨ Résultat net <span class="text-teal-500 font-normal text-sm">(latent + figé)</span></p>
-                                <p class="text-4xl lg:text-5xl font-extrabold ${netPos ? 'text-emerald-600' : 'text-rose-600'} mt-1 leading-tight flex flex-wrap items-baseline gap-x-2">
-                                    ${_signedCurrency(data.net_total ?? 0)}${_pctOfInvestedHtml(data.net_total ?? 0, investedForRoi, `text-2xl lg:text-3xl font-bold ml-1 ${netPos ? 'text-emerald-700' : 'text-rose-600'}`)}
+                                <p class="text-teal-600 text-sm sm:text-base font-semibold">✨ Résultat net <span class="text-teal-500 font-normal text-xs sm:text-sm">(latent + figé)</span></p>
+                                <p class="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-extrabold ${netPos ? 'text-emerald-600' : 'text-rose-600'} mt-1 leading-tight flex flex-wrap items-baseline gap-x-2">
+                                    ${_signedCurrency(data.net_total ?? 0)}${_pctOfInvestedHtml(data.net_total ?? 0, investedForRoi, `text-lg sm:text-2xl lg:text-3xl font-bold ml-1 ${netPos ? 'text-emerald-700' : 'text-rose-600'}`)}
                                 </p>
                                 <p class="text-xs text-teal-600/90 mt-3 leading-snug max-w-md">
                                     <span class="font-semibold text-emerald-700">Gains totaux</span> ${formatCurrency(data.total_gain ?? 0)}${_pctOfInvestedHtml(data.total_gain ?? 0, investedForRoi, 'text-xs font-semibold text-emerald-700 ml-1')}
@@ -2009,7 +2009,7 @@ function renderDashboard(data, txs = []) {
                             <div>
                                 <p class="text-teal-500 text-sm font-medium">📈 Gains Totaux</p>
                                 <p class="text-[10px] text-teal-600/80 -mt-0.5 mb-1">latent (détenus)</p>
-                                <p class="text-3xl font-bold text-emerald-600 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_gain ?? 0)}${_pctOfInvestedHtml(data.total_gain ?? 0, investedForRoi, 'text-lg font-bold text-emerald-700')}</p>
+                                <p class="text-2xl sm:text-3xl font-bold text-emerald-600 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_gain ?? 0)}${_pctOfInvestedHtml(data.total_gain ?? 0, investedForRoi, 'text-lg font-bold text-emerald-700')}</p>
                             </div>
                             <div class="bg-emerald-100 p-4 rounded-full shrink-0">
                                 <i class="fas fa-arrow-up text-emerald-500 text-2xl"></i>
@@ -2023,7 +2023,7 @@ function renderDashboard(data, txs = []) {
                             <div>
                                 <p class="text-teal-500 text-sm font-medium">📉 Pertes Totales</p>
                                 <p class="text-[10px] text-teal-600/80 -mt-0.5 mb-1">latent (détenus)</p>
-                                <p class="text-3xl font-bold text-rose-500 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_loss ?? 0)}${_pctOfInvestedHtml(data.total_loss ?? 0, investedForRoi, 'text-lg font-bold text-rose-600', 'loss_mag')}</p>
+                                <p class="text-2xl sm:text-3xl font-bold text-rose-500 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_loss ?? 0)}${_pctOfInvestedHtml(data.total_loss ?? 0, investedForRoi, 'text-lg font-bold text-rose-600', 'loss_mag')}</p>
                             </div>
                             <div class="bg-rose-100 p-4 rounded-full shrink-0">
                                 <i class="fas fa-arrow-down text-rose-400 text-2xl"></i>
@@ -2037,7 +2037,7 @@ function renderDashboard(data, txs = []) {
                             <div class="flex items-center justify-between w-full gap-2 px-1">
                                 <div class="min-w-0">
                                     <p class="text-teal-500 text-sm font-medium">🔒 Gain Figé</p>
-                                    <p class="text-3xl font-bold ${(data.realized_gain ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500'} mt-1 leading-tight flex flex-wrap items-baseline gap-x-1">
+                                    <p class="text-2xl sm:text-3xl font-bold ${(data.realized_gain ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-500'} mt-1 leading-tight flex flex-wrap items-baseline gap-x-1">
                                         ${formatCurrency(data.realized_gain ?? 0)}${_pctOfInvestedHtml(data.realized_gain ?? 0, investedForRoi, `text-lg font-bold ml-1 ${(data.realized_gain ?? 0) >= 0 ? 'text-emerald-700' : 'text-rose-600'}`)}
                                     </p>
                                     <p class="text-xs text-teal-400 mt-0.5 leading-snug">Gains réalisés (ventes)${data.hifo_pending ? ' — <span class="text-amber-500">HIFO : cliquez sur « Recalculer HIFO »</span>' : ' — <span class="text-teal-500/80">figés en base, ne suivent pas le cours du jour</span>'}</p>
@@ -2058,7 +2058,7 @@ function renderDashboard(data, txs = []) {
                             <div class="flex items-center justify-between w-full gap-2 px-1">
                                 <div class="min-w-0">
                                     <p class="text-teal-500 text-sm font-medium">🔓 Perte Figée</p>
-                                    <p class="text-3xl font-bold text-rose-500 mt-1 leading-tight flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.realized_loss ?? 0)}${_pctOfInvestedHtml(data.realized_loss ?? 0, investedForRoi, 'text-lg font-bold text-rose-600 ml-1', 'loss_mag')}</p>
+                                    <p class="text-2xl sm:text-3xl font-bold text-rose-500 mt-1 leading-tight flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.realized_loss ?? 0)}${_pctOfInvestedHtml(data.realized_loss ?? 0, investedForRoi, 'text-lg font-bold text-rose-600 ml-1', 'loss_mag')}</p>
                                     <p class="text-xs text-teal-400 mt-0.5 leading-snug">Pertes réalisées (ventes)${data.hifo_pending ? ' — <span class="text-amber-500">HIFO : voir « Recalculer HIFO »</span>' : ' — <span class="text-teal-500/80">figées en base, ne suivent pas le cours du jour</span>'}</p>
                                 </div>
                                 <div class="bg-rose-100 p-3 rounded-full shrink-0">
@@ -2464,17 +2464,17 @@ async function renderTokens(allTokens, options = {}) {
                     : 'text-slate-600';
 
             return `
-                <div class="glass rounded-2xl shadow-xl p-6 card-hover transition-all flex flex-col gap-4">
+                <div class="glass rounded-2xl shadow-xl p-4 sm:p-6 card-hover transition-all flex flex-col gap-4">
                     <!-- En-tête -->
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <h3 class="text-xl font-bold text-teal-800">${token.name}</h3>
-                            <p class="text-xs text-teal-400 font-mono mt-1">${addrShort}</p>
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div class="min-w-0">
+                            <h3 class="text-lg sm:text-xl font-bold text-teal-800 break-words">${token.name}</h3>
+                            <p class="text-xs text-teal-400 font-mono mt-1 break-all">${addrShort}</p>
                             <a href="${dexHref}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 mt-1.5 text-xs text-teal-500 hover:text-teal-700 font-medium" title="${walletAddress ? 'Voir sur DexScreener avec vos achats/ventes' : 'Voir sur DexScreener'}">
                                 <i class="fas fa-chart-line"></i> DexScreener
                             </a>
                         </div>
-                        <div class="flex flex-wrap gap-1.5 sm:gap-2 items-center justify-end">
+                        <div class="flex flex-wrap gap-1.5 sm:gap-2 items-center sm:justify-end w-full sm:w-auto">
                             <button type="button" onclick="showTokenTransactions(${token.id}, '${token.name.replace(/'/g, "\\'")}')"
                                 class="text-xs font-semibold px-2 py-1 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"
                                 title="Voir le tableau des transactions">
@@ -3497,7 +3497,7 @@ function showNotification(message, type = 'info') {
     };
     
     const notification = document.createElement('div');
-    notification.className = `fixed top-4 right-4 ${colors[type]} text-white px-6 py-4 rounded-lg shadow-lg z-50 animate-pulse-slow`;
+    notification.className = `fixed top-[max(0.75rem,env(safe-area-inset-top))] left-3 right-3 sm:left-auto sm:right-4 sm:max-w-md ${colors[type]} text-white px-4 py-3 sm:px-6 sm:py-4 rounded-lg shadow-lg z-[200] text-sm sm:text-base animate-pulse-slow`;
     notification.innerHTML = `
         <div class="flex items-center gap-3">
             <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
@@ -3517,15 +3517,15 @@ function displayEmptyDashboard() {
     const dashboard = document.getElementById('dashboard');
     dashboard.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6';
     const emptyCard = (icon, iconBg, iconColor, label, sub = '') => `
-        <div class="glass rounded-xl p-6 shadow-md card-hover transition-all">
-            <div class="flex items-center justify-between">
-                <div>
+        <div class="glass rounded-xl p-4 sm:p-6 shadow-md card-hover transition-all">
+            <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
                     <p class="text-teal-500 text-sm font-medium">${label}</p>
-                    <p class="text-3xl font-bold text-teal-200 mt-2">--</p>
+                    <p class="text-2xl sm:text-3xl font-bold text-teal-200 mt-2">--</p>
                     ${sub ? `<p class="text-xs text-teal-300 mt-1">${sub}</p>` : ''}
                 </div>
-                <div class="${iconBg} p-4 rounded-full">
-                    <i class="${icon} ${iconColor} text-2xl"></i>
+                <div class="${iconBg} p-3 sm:p-4 rounded-full shrink-0">
+                    <i class="${icon} ${iconColor} text-xl sm:text-2xl"></i>
                 </div>
             </div>
         </div>`;
