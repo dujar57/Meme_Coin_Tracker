@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException, Query, Request, Body, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -16,9 +18,19 @@ import time
 import csv
 import io
 from contextlib import contextmanager
+from collections import defaultdict
 from dotenv import load_dotenv
 
-from config import ALLOWED_ORIGINS, API_KEY, REQUIRE_API_KEY
+from config import (
+    ALLOWED_ORIGINS,
+    API_KEY,
+    CORS_ALLOW_HEADERS,
+    CORS_ALLOW_METHODS,
+    IS_PROD,
+    REQUIRE_API_KEY,
+    TRUSTED_HOSTS,
+    USE_TRUSTED_HOST,
+)
 import auth_service
 
 # Charger le .env depuis le dossier du fichier (chemin absolu, indépendant du cwd)
@@ -59,6 +71,47 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
+
+# Stables / quote souvent reçus ou envoyés comme jambe intermédiaire (Jupiter, etc.). Ne pas répartir
+# sol_spent / sol_recv dessus quand un autre jeton non-stable est dans la même tx — sinon le coût
+# est divisé par 2 (ex. ~50 € affichés comme ~25 €).
+_SWAP_INTERMEDIATE_STABLE_MINTS: frozenset[str] = frozenset(
+    {
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+        "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",  # PayPal USD (PYUSD)
+        "USDH1SM1ojwWUga67PGrgFWUHrytwVQHD9sjXHZkhf",  # USDH
+        "9zNQRsGLjNKwCUU5Gq5LR8beUCPzQMVMqKAi3SSZh54u",  # FDUSD
+        "2uYLdN8wjW2VdvRsTWqpXVovPLV89sSZUGNfKAQdjZz",  # EURC
+    }
+)
+
+
+def _helius_merge_token_transfers_by_mint(transfers: list) -> list:
+    """
+    Helius peut éclater le même mint en plusieurs lignes ; sans fusion, sol_spent est divisé par n
+    (même effet visuel qu’un swap à moitié prix).
+    """
+    if len(transfers) <= 1:
+        return transfers
+    sums: dict[str, float] = defaultdict(float)
+    first_row: dict[str, dict] = {}
+    order: list[str] = []
+    for t in transfers:
+        m = (t.get("mint") or "").strip()
+        if not m:
+            continue
+        sums[m] += float(t.get("tokenAmount", 0) or 0)
+        if m not in first_row:
+            first_row[m] = t
+            order.append(m)
+    out: list = []
+    for m in order:
+        row = dict(first_row[m])
+        row["mint"] = m
+        row["tokenAmount"] = sums[m]
+        out.append(row)
+    return out
 
 
 def _row_get(row, key: str, default=None):
@@ -540,19 +593,141 @@ _price_batch_cache_ttl = 20  # court : évite de garder des prix à 0 après tim
 _price_cache: dict = {}  # {token_address: {"price": float, "timestamp": float}}
 _price_cache_lock = asyncio.Lock()
 
-app = FastAPI(title="Meme Coin Tracker API")
+# Rate-limit auth (mémoire processus — multi-instance = somme des limites)
+_auth_strict_buckets: defaultdict[str, list[float]] = defaultdict(list)
+_auth_loose_buckets: defaultdict[str, list[float]] = defaultdict(list)
+_AUTH_STRICT_MAX = 8
+_AUTH_LOOSE_MAX = 40
+_AUTH_RL_SEC = 60
+
+# Toutes les routes /api/ sauf health (anti-abus basique)
+_api_rl_buckets: defaultdict[str, list[float]] = defaultdict(list)
+_API_RL_MAX = 400
+_API_RL_SEC = 60
+
+
+def _client_ip(request: Request) -> str:
+    xf = request.headers.get("x-forwarded-for")
+    if xf:
+        return xf.split(",")[0].strip()[:45]
+    if request.client:
+        return request.client.host or "unknown"
+    return "unknown"
+
+
+class AuthRateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method != "POST":
+            return await call_next(request)
+        path = request.url.path
+        if not path.startswith("/api/auth/"):
+            return await call_next(request)
+        ip = _client_ip(request)
+        now = time.time()
+        if path in ("/api/auth/login", "/api/auth/register"):
+            b = _auth_strict_buckets[ip]
+            b[:] = [t for t in b if now - t < _AUTH_RL_SEC]
+            if len(b) >= _AUTH_STRICT_MAX:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Trop de tentatives. Réessayez dans une minute."},
+                )
+            b.append(now)
+        else:
+            lb = _auth_loose_buckets[ip]
+            lb[:] = [t for t in lb if now - t < _AUTH_RL_SEC]
+            if len(lb) >= _AUTH_LOOSE_MAX:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Trop de requêtes auth. Réessayez dans une minute."},
+                )
+            lb.append(now)
+        return await call_next(request)
+
+
+class ApiRateLimitMiddleware(BaseHTTPMiddleware):
+    """Limite globale /api/ par IP (OPTIONS et /api/health exclus)."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/health":
+            ip = _client_ip(request)
+            now = time.time()
+            b = _api_rl_buckets[ip]
+            b[:] = [t for t in b if now - t < _API_RL_SEC]
+            if len(b) >= _API_RL_MAX:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Trop de requêtes. Pause courte puis réessayez."},
+                )
+            b.append(now)
+        return await call_next(request)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if "server" in response.headers:
+            del response.headers["server"]
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "accelerometer=(), camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+        )
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+        if IS_PROD and proto == "https":
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+        if IS_PROD:
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                (
+                    "default-src 'self'; "
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+                    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://unpkg.com; "
+                    "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+                    "img-src 'self' data: https: blob:; "
+                    "font-src 'self' https://cdnjs.cloudflare.com data:; "
+                    "connect-src 'self' https: wss:; "
+                    "frame-ancestors 'none'; "
+                    "base-uri 'self'; "
+                    "form-action 'self'"
+                ),
+            )
+        return response
+
+
+app = FastAPI(
+    title="Meme Coin Tracker API",
+    docs_url=None if IS_PROD else "/docs",
+    redoc_url=None if IS_PROD else "/redoc",
+    openapi_url=None if IS_PROD else "/openapi.json",
+)
 
 # GZip — compression des réponses API (réduit la bande passante)
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
-# CORS — origines depuis .env (pas * en prod)
+# CORS — origines explicites ; Render : RENDER_EXTERNAL_URL ajouté dans config.py
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=CORS_ALLOW_METHODS,
+    allow_headers=CORS_ALLOW_HEADERS,
 )
+
+app.add_middleware(AuthRateLimitMiddleware)
+app.add_middleware(ApiRateLimitMiddleware)
+if USE_TRUSTED_HOST:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
+# En dernier = enveloppe la plus externe : en-têtes sur toutes les réponses (dont 429)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 def _check_api_key(request: Request) -> bool:
@@ -648,6 +823,12 @@ class ReferenceCapitalAddBody(BaseModel):
     add_usd: float
 
 
+class DatabaseWipeBody(BaseModel):
+    """Corps attendu pour POST /api/database/wipe-all-data — phrase exacte obligatoire."""
+
+    confirm: str
+
+
 class AuthRegisterBody(BaseModel):
     username: str
     password: str
@@ -725,6 +906,36 @@ def get_db():
     finally:
         conn.close()
 
+
+def wipe_all_database_data(conn: sqlite3.Connection) -> list[str]:
+    """
+    Supprime toutes les lignes de chaque table utilisateur (schéma et index inchangés).
+    Réinitialise les compteurs AUTOINCREMENT (sqlite_sequence).
+    """
+    c = conn.cursor()
+    c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    )
+    tables = [r[0] for r in c.fetchall()]
+    c.execute("PRAGMA foreign_keys=OFF")
+    cleared: list[str] = []
+    for t in tables:
+        if t == "sqlite_sequence":
+            continue
+        try:
+            c.execute(f'DELETE FROM "{t}"')
+            cleared.append(t)
+        except sqlite3.OperationalError:
+            pass
+    try:
+        c.execute("DELETE FROM sqlite_sequence")
+    except sqlite3.OperationalError:
+        pass
+    c.execute("PRAGMA foreign_keys=ON")
+    conn.commit()
+    return cleared
+
+
 def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
@@ -797,10 +1008,11 @@ def init_db():
                 tokens_bought REAL NOT NULL,
                 purchase_price REAL NOT NULL,
                 sol_spent REAL NOT NULL,
-                transaction_signature TEXT UNIQUE,
+                transaction_signature TEXT NOT NULL,
                 sol_usd_at_buy REAL DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (token_id) REFERENCES tokens (id)
+                FOREIGN KEY (token_id) REFERENCES tokens (id),
+                UNIQUE(token_id, transaction_signature)
             )
         """)
 
@@ -903,6 +1115,92 @@ def _migrate_tokens_wallet_scoped_unique(conn):
     except Exception as e:
         conn.rollback()
         print(f"[!] Migration tokens wallet-scoped: {e}")
+    finally:
+        c.execute("PRAGMA foreign_keys=ON")
+
+
+def _migrate_purchases_token_signature_unique(conn):
+    """
+    Ancien schéma : UNIQUE sur transaction_signature → une seule ligne d’achat par tx ;
+    si un swap crédite 2 jetons non-stables, le 2ᵉ était ignoré (INSERT OR IGNORE) alors que
+    les soldes token étaient quand même mis à jour — incohérence et PnL faux.
+    Nouveau : UNIQUE(token_id, transaction_signature).
+    """
+    c = conn.cursor()
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='purchases'"
+    ).fetchone()
+    if not row or not row[0]:
+        return
+    sl = " ".join(row[0].split())
+    if "UNIQUE(token_id, transaction_signature)" in sl.replace(" ", ""):
+        return
+    if "transaction_signature TEXT UNIQUE" not in sl:
+        return
+
+    c.execute("PRAGMA table_info(purchases)")
+    col_names = [r["name"] for r in c.fetchall()]
+    required = [
+        "id",
+        "token_id",
+        "purchase_date",
+        "purchase_timestamp",
+        "tokens_bought",
+        "purchase_price",
+        "sol_spent",
+        "transaction_signature",
+        "sol_usd_at_buy",
+        "wallet_address",
+        "created_at",
+        "purchase_slot",
+    ]
+    if any(x not in col_names for x in required):
+        print("[!] purchases: colonnes inattendues — migration UNIQUE(token_id, sig) ignorée")
+        return
+
+    c.execute("PRAGMA foreign_keys=OFF")
+    try:
+        c.execute("DROP TABLE IF EXISTS purchases_new")
+        c.execute(
+            """
+            CREATE TABLE purchases_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id INTEGER NOT NULL,
+                purchase_date TEXT NOT NULL,
+                purchase_timestamp INTEGER,
+                tokens_bought REAL NOT NULL,
+                purchase_price REAL NOT NULL,
+                sol_spent REAL NOT NULL,
+                transaction_signature TEXT NOT NULL,
+                sol_usd_at_buy REAL DEFAULT NULL,
+                wallet_address TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                purchase_slot INTEGER DEFAULT 0,
+                FOREIGN KEY (token_id) REFERENCES tokens (id),
+                UNIQUE(token_id, transaction_signature)
+            )
+            """
+        )
+        ins_cols = ", ".join(required)
+        c.execute(
+            f"""
+            INSERT INTO purchases_new ({ins_cols})
+            SELECT
+                id, token_id, purchase_date, purchase_timestamp,
+                tokens_bought, purchase_price, sol_spent, transaction_signature,
+                sol_usd_at_buy, wallet_address, created_at, COALESCE(purchase_slot, 0)
+            FROM purchases
+            """
+        )
+        c.execute("DROP TABLE purchases")
+        c.execute("ALTER TABLE purchases_new RENAME TO purchases")
+        conn.commit()
+        print(
+            "[OK] Migration purchases: UNIQUE(token_id, transaction_signature) — plusieurs jetons / même tx"
+        )
+    except Exception as e:
+        conn.rollback()
+        print(f"[!] Migration purchases token+sig: {e}")
     finally:
         c.execute("PRAGMA foreign_keys=ON")
 
@@ -1378,11 +1676,12 @@ async def startup_event():
                 tokens_bought REAL NOT NULL,
                 purchase_price REAL NOT NULL,
                 sol_spent REAL NOT NULL,
-                transaction_signature TEXT UNIQUE,
+                transaction_signature TEXT NOT NULL,
                 sol_usd_at_buy REAL DEFAULT NULL,
                 wallet_address TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (token_id) REFERENCES tokens (id)
+                FOREIGN KEY (token_id) REFERENCES tokens (id),
+                UNIQUE(token_id, transaction_signature)
             )
         """)
         # Migration douce : ajouter wallet_address aux purchases existantes
@@ -1397,6 +1696,8 @@ async def startup_event():
             """)
         if "purchase_slot" not in purchase_cols:
             c.execute("ALTER TABLE purchases ADD COLUMN purchase_slot INTEGER DEFAULT 0")
+
+        _migrate_purchases_token_signature_unique(conn)
         
         # === CRÉER LES INDEXES POUR MAXIMISER LA PERFORMANCE ===
         indexes = [
@@ -2372,25 +2673,35 @@ async def audit_data(wallet: Optional[str] = Query(None)):
         for r in cursor.fetchall():
             issues.append({"type": "negative_balance", "token_id": r["id"], "name": r["name"], "current_tokens": r["current_tokens"]})
 
-        # 2. Doublons transaction_signature (purchases)
+        # 2. Doublons (même signature + même token) sur purchases — plusieurs lignes identiques
         cursor.execute("""
-            SELECT transaction_signature, COUNT(*) as cnt FROM purchases
+            SELECT transaction_signature, token_id, COUNT(*) as cnt FROM purchases
             WHERE transaction_signature IS NOT NULL AND transaction_signature != ''
-            GROUP BY transaction_signature HAVING cnt > 1
+            GROUP BY transaction_signature, token_id HAVING cnt > 1
         """)
         for r in cursor.fetchall():
-            issues.append({"type": "duplicate_purchase_sig", "signature": r["transaction_signature"], "count": r["cnt"]})
+            issues.append({
+                "type": "duplicate_purchase_sig",
+                "signature": r["transaction_signature"],
+                "token_id": r["token_id"],
+                "count": r["cnt"],
+            })
 
-        # 3. Doublons transaction_signature (sales)
+        # 3. Doublons (même signature + même token) sur sales
         cursor.execute("""
-            SELECT transaction_signature, COUNT(*) as cnt FROM sales s
+            SELECT s.transaction_signature, s.token_id, COUNT(*) as cnt FROM sales s
             JOIN tokens t ON s.token_id = t.id
-            WHERE transaction_signature IS NOT NULL AND transaction_signature != ''
+            WHERE s.transaction_signature IS NOT NULL AND s.transaction_signature != ''
             """ + (f" AND t.wallet_address = ?" if wallet else "") + """
-            GROUP BY transaction_signature HAVING cnt > 1
+            GROUP BY s.transaction_signature, s.token_id HAVING cnt > 1
         """, params if wallet else ())
         for r in cursor.fetchall():
-            issues.append({"type": "duplicate_sale_sig", "signature": r["transaction_signature"], "count": r["cnt"]})
+            issues.append({
+                "type": "duplicate_sale_sig",
+                "signature": r["transaction_signature"],
+                "token_id": r["token_id"],
+                "count": r["cnt"],
+            })
 
         # 4. Tokens sans wallet (si multi-wallet activé)
         if wallet:
@@ -2399,6 +2710,52 @@ async def audit_data(wallet: Optional[str] = Query(None)):
                 issues.append({"type": "token_missing_wallet", "token_id": r["id"], "name": r["name"]})
 
     return {"ok": len(issues) == 0, "issues": issues, "count": len(issues)}
+
+
+WIPE_DB_CONFIRM_PHRASE = "EFFACER_TOUTES_LES_DONNEES"
+
+
+@app.post("/api/database/wipe-all-data")
+async def wipe_all_database_endpoint(
+    body: DatabaseWipeBody,
+    vacuum: bool = Query(False, description="VACUUM après coup (réduit la taille du fichier .db, plus lent)."),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """
+    Vide toutes les tables applicatives (tokens, achats, ventes, auth, réglages, caches…).
+    Les CREATE TABLE et index restent ; seules les lignes sont supprimées. Compteurs AUTOINCREMENT remis à zéro.
+    """
+    if (body.confirm or "").strip() != WIPE_DB_CONFIRM_PHRASE:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Confirmation invalide : JSON {{"confirm": "{WIPE_DB_CONFIRM_PHRASE}"}}',
+        )
+    if IS_PROD and API_KEY and (x_api_key or "").strip() != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="En production, en-tête X-API-Key doit correspondre à API_KEY (.env).",
+        )
+
+    with get_db() as conn:
+        cleared = wipe_all_database_data(conn)
+
+    if vacuum:
+        vconn = sqlite3.connect(DB_PATH, timeout=120)
+        try:
+            vconn.execute("VACUUM")
+            vconn.commit()
+        finally:
+            vconn.close()
+
+    _invalidate_dashboard_cache(None)
+    _invalidate_charts_cache()
+
+    return {
+        "ok": True,
+        "message": "Base vidée — schéma et index conservés.",
+        "tables_cleared": cleared,
+        "vacuum": vacuum,
+    }
 
 
 @app.get("/api/export/csv")
@@ -4127,12 +4484,17 @@ async def helius_import_swaps(
         False,
         description="Si True, ne pas lancer update_all_prices à la fin (le client peut appeler /update-prices).",
     ),
+    repair_imported_buys: bool = Query(
+        False,
+        description="Si True, supprime et réimporte les achats déjà marqués dans imported_tx (nécessaire après correction du parser).",
+    ),
 ):
     """
     Récupère les swaps du wallet via Helius et les importe dans la BDD.
     S'arrête dès qu'une transaction déjà importée est trouvée (pas de fetch inutile).
     - Crée ou met à jour les tokens achetés
     - Enregistre les ventes (dédoublonnage par signature de transaction)
+    - repair_imported_buys=True : recalcule les achats déjà importés (sinon un 2e import ne change rien).
     """
     key = _helius_key()
     swaps_fetched: list = []
@@ -4165,15 +4527,16 @@ async def helius_import_swaps(
                 all_recent_known = bool(sigs_fb) and all(
                     _tx_signature_recorded_in_db(conn, s) for s in sigs_fb
                 )
-            if all_recent_known and not resume_history:
+            if all_recent_known and not resume_history and not repair_imported_buys:
                 return {
                     "message": "Déjà à jour.",
                     "imported_buys": 0,
                     "imported_sales": 0,
+                    "repaired_buy_transactions": 0,
                     "skipped": True,
                     "may_have_more_history": False,
                 }
-            if all_recent_known and resume_history:
+            if all_recent_known and resume_history and not repair_imported_buys:
                 # Reprendre plus loin dans le passé sans retraiter le bloc récent
                 cursor_sig = first_batch[-1].get("signature", "") or None
                 swaps_fetched = []
@@ -4205,8 +4568,9 @@ async def helius_import_swaps(
             last_batch_size = len(batch)
 
             # Vérifier si on a déjà importé une de ces tx → on a rattrapé le retard
+            # (sauf repair_imported_buys : il faut continuer à paginer pour réécrire l’historique)
             sigs = [tx.get("signature", "") for tx in batch if tx.get("signature")]
-            if sigs:
+            if sigs and not repair_imported_buys:
                 with get_db() as conn:
                     ph = ",".join("?" * len(sigs))
                     cur = conn.execute(
@@ -4219,7 +4583,10 @@ async def helius_import_swaps(
             swaps_fetched.extend(batch)
             cursor_sig = batch[-1]["signature"]
 
-            if caught_up or len(batch) < BATCH_SIZE:
+            if repair_imported_buys:
+                if len(batch) < BATCH_SIZE:
+                    break
+            elif caught_up or len(batch) < BATCH_SIZE:
                 break
         else:
             exhausted_inner_budget = inner_pages > 0
@@ -4241,6 +4608,7 @@ async def helius_import_swaps(
             "message": "Aucun swap trouvé pour ce wallet.",
             "imported_buys": 0,
             "imported_sales": 0,
+            "repaired_buy_transactions": 0,
             "may_have_more_history": False,
         }
 
@@ -4287,6 +4655,7 @@ async def helius_import_swaps(
 
     imported_buys = 0
     imported_sales = 0
+    repaired_buy_transactions = 0
     errors = []
 
     with get_db() as conn:
@@ -4395,6 +4764,8 @@ async def helius_import_swaps(
                                    and t.get("mint", "") not in BLACKLISTED_MINTS
                                    and t.get("mint", "") not in _IMPORT_IGNORE_SPL_MINTS
                                    and t.get("mint", "") != ""]
+                tokens_received = _helius_merge_token_transfers_by_mint(tokens_received)
+                tokens_sent = _helius_merge_token_transfers_by_mint(tokens_sent)
 
                 # Wrapped-SOL reçu/envoyé par le wallet (tokenAmount déjà en SOL)
                 wsol_received = sum(float(t.get("tokenAmount", 0) or 0) for t in token_transfers
@@ -4432,16 +4803,30 @@ async def helius_import_swaps(
                 sol_at_tx = _date_sol_cache.get(tx_date) or sol_usd
 
                 if is_buy:
-                    # Dédoublonnage
+                    # Dédoublonnage (sans repair : un 2e import ne corrige pas les montants déjà en BDD)
                     already_imported = db_cur.execute("SELECT 1 FROM imported_tx WHERE signature = ?", (sig,)).fetchone()
                     if already_imported:
-                        if tx_slot:
+                        if repair_imported_buys:
                             db_cur.execute(
-                                "UPDATE purchases SET purchase_slot = ? WHERE transaction_signature = ?",
-                                (tx_slot, sig)
+                                """
+                                DELETE FROM purchases WHERE transaction_signature = ?
+                                AND (wallet_address = ? OR token_id IN (
+                                    SELECT id FROM tokens WHERE wallet_address = ?
+                                ))
+                                """,
+                                (sig, wallet_address, wallet_address),
                             )
+                            db_cur.execute("DELETE FROM imported_tx WHERE signature = ?", (sig,))
                             conn.commit()
-                        continue
+                            repaired_buy_transactions += 1
+                        else:
+                            if tx_slot:
+                                db_cur.execute(
+                                    "UPDATE purchases SET purchase_slot = ? WHERE transaction_signature = ?",
+                                    (tx_slot, sig)
+                                )
+                                conn.commit()
+                            continue
 
                     # SOL dépensé (dans l'ordre de fiabilité) :
                     # 1. wSOL wrappé envoyé : le plus précis (déjà en SOL, hors frais)
@@ -4457,11 +4842,25 @@ async def helius_import_swaps(
                     if sol_spent == 0:
                         continue
 
-                    n_toks = len(tokens_received) or 1
+                    valid_received = [
+                        t
+                        for t in tokens_received
+                        if t.get("mint") and float(t.get("tokenAmount", 0) or 0) != 0
+                    ]
+                    non_stable_recv = [
+                        t
+                        for t in valid_received
+                        if t.get("mint", "") not in _SWAP_INTERMEDIATE_STABLE_MINTS
+                    ]
+                    cost_targets_recv = non_stable_recv if non_stable_recv else valid_received
+                    n_toks = len(cost_targets_recv) or 1
+
                     for tok in tokens_received:
                         mint         = tok.get("mint", "")
                         token_amount = float(tok.get("tokenAmount", 0) or 0)
                         if not mint or token_amount == 0:
+                            continue
+                        if mint in _SWAP_INTERMEDIATE_STABLE_MINTS and non_stable_recv:
                             continue
 
                         tok_sol_spent   = sol_spent / n_toks
@@ -4555,11 +4954,25 @@ async def helius_import_swaps(
                         continue
 
                     sell_signature_touched = False
-                    n_toks = len(tokens_sent) or 1
+                    valid_sent = [
+                        t
+                        for t in tokens_sent
+                        if t.get("mint") and float(t.get("tokenAmount", 0) or 0) != 0
+                    ]
+                    non_stable_sent = [
+                        t
+                        for t in valid_sent
+                        if t.get("mint", "") not in _SWAP_INTERMEDIATE_STABLE_MINTS
+                    ]
+                    cost_targets_sent = non_stable_sent if non_stable_sent else valid_sent
+                    n_toks = len(cost_targets_sent) or 1
+
                     for tok in tokens_sent:
                         mint         = tok.get("mint", "")
                         token_amount = float(tok.get("tokenAmount", 0) or 0)
                         if not mint or token_amount == 0:
+                            continue
+                        if mint in _SWAP_INTERMEDIATE_STABLE_MINTS and non_stable_sent:
                             continue
 
                         db_cur.execute("SELECT id, current_tokens FROM tokens WHERE address = ? AND wallet_address = ?", (mint, wallet_address))
@@ -4569,11 +4982,14 @@ async def helius_import_swaps(
 
                         token_id = tok_row["id"]
 
-                        existing_sale = db_cur.execute("SELECT id FROM sales WHERE transaction_signature = ?", (sig,)).fetchone()
+                        existing_sale = db_cur.execute(
+                            "SELECT id FROM sales WHERE transaction_signature = ? AND token_id = ?",
+                            (sig, token_id),
+                        ).fetchone()
                         if existing_sale and tx_slot:
                             db_cur.execute(
-                                "UPDATE sales SET sale_slot = ? WHERE transaction_signature = ?",
-                                (tx_slot, sig)
+                                "UPDATE sales SET sale_slot = ? WHERE transaction_signature = ? AND token_id = ?",
+                                (tx_slot, sig, token_id),
                             )
                             conn.commit()
                         if existing_sale:
@@ -4679,6 +5095,7 @@ async def helius_import_swaps(
         "swaps_analysed": len(swaps_fetched),
         "imported_buys": imported_buys,
         "imported_sales": imported_sales,
+        "repaired_buy_transactions": repaired_buy_transactions,
         "prices_updated": prices_updated,
         "may_have_more_history": may_have_more_history,
         "errors": errors[:10],

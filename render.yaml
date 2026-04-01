@@ -12,5 +12,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.3"
+      # Render fournit automatiquement RENDER_EXTERNAL_URL et RENDER_EXTERNAL_HOSTNAME (CORS + Trusted Host)
+      - key: ENV
+        value: production
       - key: HELIUS_API_KEY
         sync: false

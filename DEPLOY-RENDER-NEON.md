@@ -12,8 +12,16 @@
 3. Tu peux importer le blueprint : fichier `render.yaml` à la racine du service.
 4. Variables d’environnement :
    - `HELIUS_API_KEY` (obligatoire)
-   - Optionnel : `ALLOWED_ORIGINS` si le front est sur un autre domaine (ex. Vercel), liste séparée par des virgules
+   - **`ENV=production`** — en-têtes (CSP, HSTS, etc.), `/docs` et `/openapi.json` désactivés, rate-limits, CORS et méthodes/en-têtes restreints.
+   - **Sur Render**, la plateforme injecte **`RENDER_EXTERNAL_URL`** et **`RENDER_EXTERNAL_HOSTNAME`** : le backend les utilise **automatiquement** pour `ALLOWED_ORIGINS` et `TRUSTED_HOSTS` (tu n’as rien à copier à la main si tu n’as qu’un seul service qui sert le front + l’API).
+   - **`ALLOWED_ORIGINS`** — optionnel ; à ajouter si tu as un **front sur un autre domaine** (ex. Vercel), en plus de l’URL Render : `https://ton-app.onrender.com,https://ton-front.vercel.app`
+   - **`TRUSTED_HOSTS`** — optionnel sur Render (complété auto via `RENDER_EXTERNAL_HOSTNAME` + `localhost` + `127.0.0.1`). À compléter sur un VPS.
    - Optionnel : `SQLITE_DB_PATH` = chemin absolu du fichier SQLite si tu montes un **disque persistant** Render (sinon la base est perdue au redémarrage sur l’offre gratuite)
+
+### Sécurité (rappel)
+
+- Le **JavaScript / HTML** du navigateur est toujours **visible** (outils développeur) : on ne peut pas « cacher » le code front. Les **secrets** (Helius, mots de passe utilisateurs hashés) restent côté **serveur** et **`.env`** (jamais commité).
+- **`API_KEY` + `X-API-Key`** : utile pour des **clients machine-à-machine** uniquement ; ne mets **pas** cette clé dans le front public.
 
 ## Neon (PostgreSQL)
 

@@ -1525,6 +1525,63 @@ async function heliusImportSwaps() {
     }
 }
 
+/** Réécrit les achats déjà importés (repair_imported_buys) — nécessaire si les montants étaient faux avant correctif serveur. */
+async function heliusRepairPurchases() {
+    if (!_checkWalletForHelius()) return;
+    const ok = confirm(
+        'Corriger les montants des achats déjà en base ?\n\n' +
+            'Le serveur va parcourir jusqu’à 40 pages d’historique Helius, supprimer les anciennes lignes d’achat concernées et les réimporter avec la logique actuelle.\n\n' +
+            'Durée : environ 1 à 2 minutes selon l’historique.'
+    );
+    if (!ok) return;
+    _heliusStartLoading();
+    document.getElementById('helius-content').innerHTML = `
+        <p class="text-amber-200 font-medium animate-pulse">
+            <i class="fas fa-wrench fa-spin mr-2"></i>
+            Réimport des achats en cours (plusieurs pages Helius)…
+        </p>
+    `;
+    try {
+        const qs = new URLSearchParams({
+            max_pages: '40',
+            resume_history: '1',
+            repair_imported_buys: '1',
+            skip_post_import_prices: '1',
+        });
+        const res = await fetch(`${API_URL}/helius/import-swaps/${encodeURIComponent(walletAddress)}?${qs}`, {
+            method: 'POST',
+        });
+        const data = await res.json();
+        _heliusStopLoading();
+        if (data.detail) {
+            showNotification(String(data.detail), 'error');
+            return;
+        }
+        const rep = data.repaired_buy_transactions ?? 0;
+        const buys = data.imported_buys ?? 0;
+        document.getElementById('helius-content').innerHTML = `
+            <h3 class="text-lg font-bold text-amber-200 mb-3">
+                <i class="fas fa-check-circle mr-2"></i>Réparation terminée
+            </h3>
+            <p class="text-gray-200 mb-2">Transactions d’achat réouvertes puis réimportées : <strong>${rep}</strong></p>
+            <p class="text-gray-200 mb-4">Nouvelles lignes d’achat écrites ce passage : <strong>${buys}</strong></p>
+        `;
+        await fetch(`${API_URL}/update-prices?wallet=${encodeURIComponent(walletAddress)}`, { method: 'POST' }).catch(() => {});
+        await fetch(`${API_URL}/recalculate-history?wallet=${encodeURIComponent(walletAddress)}`, {
+            method: 'POST',
+        }).catch(() => {});
+        await dbOnlyRefresh(true, true);
+        await loadTokens();
+        showNotification(
+            `Montants : ${rep} tx réparées, ${buys} achats réécrits — pensez à vérifier vos positions.`,
+            'success'
+        );
+    } catch (e) {
+        _heliusStopLoading();
+        showNotification('Erreur réparation achats: ' + e.message, 'error');
+    }
+}
+
 // ── Toutes transactions (brutes) ─────────────────────────────────────────
 async function heliusTransactions() {
     if (!_checkWalletForHelius()) return;
@@ -1892,6 +1949,10 @@ function renderDashboard(data, txs = []) {
         const flipFront = 'dashboard-flip-front glass rounded-xl p-3 sm:p-4 shadow-md card-hover transition-all flex items-center';
         const flipBack = 'dashboard-flip-back glass rounded-xl p-1 shadow-md overflow-hidden';
         const netPos = (data.net_total ?? 0) >= 0;
+        const pnlFigedNet = (data.realized_gain ?? 0) - (data.realized_loss ?? 0);
+        const pnlLatentNet = (data.total_gain ?? 0) - (data.total_loss ?? 0);
+        const pnlFigedPos = pnlFigedNet >= 0;
+        const pnlLatentPos = pnlLatentNet >= 0;
         dashboard.innerHTML = `
             <!-- Colonne gauche (mobile: après le centre) -->
             <div class="order-3 lg:order-none lg:col-span-3 lg:row-span-2 lg:col-start-1 lg:row-start-1 flex flex-col gap-6">
@@ -2068,6 +2129,55 @@ function renderDashboard(data, txs = []) {
                         </div>
                         <div class="${flipBack}">
                             ${buildDashboardCardTableBack('realized_loss', txs)}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PnL net figé vs PnL net actuel (latent) -->
+            <div class="order-5 lg:order-none lg:col-span-12 lg:row-start-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="${cardStd} border border-amber-300/35 bg-gradient-to-br from-amber-50/90 to-white/80">
+                    <div class="flex items-start justify-between gap-3">
+                        <div class="min-w-0 flex-1">
+                            <p class="text-amber-800 text-sm font-semibold flex items-center gap-2">
+                                <i class="fas fa-anchor text-amber-600"></i>
+                                PnL figé (réalisé)
+                            </p>
+                            <p class="text-[11px] text-amber-900/70 mt-1 leading-snug">Sur les ventes déjà passées — figé en base après « Recalculer HIFO » (ne bouge pas avec le cours du jour).</p>
+                            <p class="text-2xl sm:text-3xl font-extrabold mt-3 ${pnlFigedPos ? 'text-emerald-600' : 'text-rose-600'} flex flex-wrap items-baseline gap-x-1">
+                                ${_signedCurrency(pnlFigedNet)}${_pctOfInvestedHtml(pnlFigedNet, investedForRoi, `text-lg font-bold ml-1 ${pnlFigedPos ? 'text-emerald-700' : 'text-rose-600'}`)}
+                            </p>
+                            <p class="text-xs text-amber-900/80 mt-2 leading-relaxed">
+                                <span class="text-emerald-700 font-semibold">+${formatCurrency(data.realized_gain ?? 0)}</span>
+                                <span class="text-amber-600/80 mx-1">−</span>
+                                <span class="text-rose-600 font-semibold">${formatCurrency(data.realized_loss ?? 0)}</span>
+                                ${data.hifo_pending ? '<span class="block text-[10px] text-amber-600 mt-1">Estimation tant que le HIFO n’est pas recalculé.</span>' : ''}
+                            </p>
+                        </div>
+                        <div class="bg-amber-100/90 p-3 sm:p-4 rounded-full shrink-0">
+                            <i class="fas fa-lock text-amber-600 text-xl sm:text-2xl"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="${cardStd} border border-sky-300/35 bg-gradient-to-br from-sky-50/90 to-white/80">
+                    <div class="flex items-start justify-between gap-3">
+                        <div class="min-w-0 flex-1">
+                            <p class="text-sky-900 text-sm font-semibold flex items-center gap-2">
+                                <i class="fas fa-bolt text-sky-600"></i>
+                                PnL actuel (latent)
+                            </p>
+                            <p class="text-[11px] text-sky-900/70 mt-1 leading-snug">Sur les tokens encore en portefeuille — évolue avec les prix du marché.</p>
+                            <p class="text-2xl sm:text-3xl font-extrabold mt-3 ${pnlLatentPos ? 'text-emerald-600' : 'text-rose-600'} flex flex-wrap items-baseline gap-x-1">
+                                ${_signedCurrency(pnlLatentNet)}${_pctOfInvestedHtml(pnlLatentNet, investedForRoi, `text-lg font-bold ml-1 ${pnlLatentPos ? 'text-emerald-700' : 'text-rose-600'}`)}
+                            </p>
+                            <p class="text-xs text-sky-900/80 mt-2 leading-relaxed">
+                                <span class="text-emerald-700 font-semibold">+${formatCurrency(data.total_gain ?? 0)}</span>
+                                <span class="text-sky-600/80 mx-1">−</span>
+                                <span class="text-rose-600 font-semibold">${formatCurrency(data.total_loss ?? 0)}</span>
+                            </p>
+                        </div>
+                        <div class="bg-sky-100/90 p-3 sm:p-4 rounded-full shrink-0">
+                            <i class="fas fa-chart-area text-sky-600 text-xl sm:text-2xl"></i>
                         </div>
                     </div>
                 </div>
