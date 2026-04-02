@@ -1,5 +1,9 @@
-# Blueprint Render : dépôt Git = ce dossier (meme_coin_tracker).
-# Si la racine du repo est au-dessus, définis rootDir dans le tableau de bord Render.
+# Blueprint Render — aucune clé, mot de passe ni URL perso en clair dans ce fichier.
+# Tout ce qui est sensible se configure dans Render : Service → Environment →
+# « Add Environment Variable » en cochant « Secret » (ou Sync: false ci-dessous).
+#
+# Après la première création / sync du blueprint, renseigne chaque variable marquée
+# sync: false dans le tableau de bord ; elles ne seront pas écrasées par les prochains déploiements.
 services:
   - type: web
     name: meme-coin-tracker
@@ -10,10 +14,42 @@ services:
     startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:
+      # Non secrets (comportement runtime)
       - key: PYTHON_VERSION
         value: "3.12.3"
-      # Render fournit automatiquement RENDER_EXTERNAL_URL et RENDER_EXTERNAL_HOSTNAME (CORS + Trusted Host)
       - key: ENV
         value: production
+      # Render injecte automatiquement (ne pas les ajouter à la main) :
+      #   RENDER_EXTERNAL_URL, RENDER_EXTERNAL_HOSTNAME, PORT
+      #
+      # ——— Secrets & config perso : valeurs UNIQUEMENT sur Render ———
       - key: HELIUS_API_KEY
+        sync: false
+      - key: BIRDEYE_API_KEY
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: SQLITE_DB_PATH
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_MODE
+        sync: false
+      - key: POSTGRES_PASSWORD
+        sync: false
+      - key: POSTGRES_USER
+        sync: false
+      - key: POSTGRES_HOST
+        sync: false
+      - key: POSTGRES_DB
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: TRUSTED_HOSTS
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DISCORD_WEBHOOK_URL
         sync: false

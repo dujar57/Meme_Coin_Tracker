@@ -1,6 +1,16 @@
 """
 Configuration centralisée : CORS, auth, env.
-Source de vérité : .env (jamais commité).
+
+Secrets (Helius, Birdeye, API_KEY, Postgres, alertes, etc.) :
+  - local : fichier .env (non versionné) ;
+  - Render : Environment Variables du service, de préférence marquées « Secret » ;
+  - ne jamais mettre de clés dans render.yaml, le dépôt Git, ni le JS du navigateur.
+
+Variables typiques côté hébergeur : HELIUS_API_KEY, BIRDEYE_API_KEY (optionnel),
+API_KEY (optionnel, appels machine-à-machine uniquement), DATABASE_URL / POSTGRES_*,
+SQLITE_DB_PATH (disque persistant), ALLOWED_ORIGINS / TRUSTED_HOSTS si besoin,
+TELEGRAM_*, DISCORD_WEBHOOK_URL. Render fournit RENDER_EXTERNAL_URL et
+RENDER_EXTERNAL_HOSTNAME automatiquement.
 """
 import os
 from dotenv import load_dotenv
@@ -71,9 +81,16 @@ CORS_ALLOW_HEADERS = [
     "Pragma",
 ]
 
-# Auth optionnelle — si API_KEY défini, les requêtes doivent inclure X-API-Key
-# (réservé aux clients non-navigateur : mettre la clé dans le front l’exposerait à tout le monde)
-API_KEY = os.getenv("API_KEY", "").strip()
+# --- Clés API : noms des variables d’environnement uniquement (pas de valeur secrète dans le code) ---
+# Les secrets sont fournis par Render (Secret) ou par le fichier .env local (non versionné).
+ENV_NAME_HELIUS_API_KEY = "HELIUS_API_KEY"
+ENV_NAME_BIRDEYE_API_KEY = "BIRDEYE_API_KEY"
+ENV_NAME_SERVICE_API_KEY = "API_KEY"
+
+HELIUS_API_KEY = os.getenv(ENV_NAME_HELIUS_API_KEY, "").strip()
+BIRDEYE_API_KEY = os.getenv(ENV_NAME_BIRDEYE_API_KEY, "").strip()
+# Clé optionnelle pour protéger l’API en prod (X-API-Key) — jamais dans le navigateur
+API_KEY = os.getenv(ENV_NAME_SERVICE_API_KEY, "").strip()
 REQUIRE_API_KEY = bool(API_KEY) and IS_PROD
 
 # Trusted Host : TRUSTED_HOSTS explicite, ou RENDER_EXTERNAL_HOSTNAME + localhost

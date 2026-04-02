@@ -24,8 +24,12 @@ from dotenv import load_dotenv
 from config import (
     ALLOWED_ORIGINS,
     API_KEY,
+    BIRDEYE_API_KEY,
     CORS_ALLOW_HEADERS,
     CORS_ALLOW_METHODS,
+    ENV_NAME_HELIUS_API_KEY,
+    ENV_NAME_SERVICE_API_KEY,
+    HELIUS_API_KEY,
     IS_PROD,
     REQUIRE_API_KEY,
     TRUSTED_HOSTS,
@@ -738,9 +742,19 @@ def _check_api_key(request: Request) -> bool:
     return key == API_KEY
 
 
+def _api_path_requires_service_api_key(path: str) -> bool:
+    """True si la route /api/* exige X-API-Key quand API_KEY est défini en prod."""
+    if not path.startswith("/api/"):
+        return False
+    # Health check Render : pas de clé (sinon le service reste « unhealthy »).
+    if path.rstrip("/") == "/api/health":
+        return False
+    return True
+
+
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
-    if REQUIRE_API_KEY and request.url.path.startswith("/api/"):
+    if REQUIRE_API_KEY and _api_path_requires_service_api_key(request.url.path):
         if not _check_api_key(request):
             return JSONResponse(status_code=401, content={"detail": "API key manquante ou invalide"})
     return await call_next(request)
@@ -2733,7 +2747,7 @@ async def wipe_all_database_endpoint(
     if IS_PROD and API_KEY and (x_api_key or "").strip() != API_KEY:
         raise HTTPException(
             status_code=401,
-            detail="En production, en-tête X-API-Key doit correspondre à API_KEY (.env).",
+            detail=f"En production, X-API-Key doit correspondre au secret {ENV_NAME_SERVICE_API_KEY} (Render / .env).",
         )
 
     with get_db() as conn:
@@ -4178,21 +4192,26 @@ async def get_gains_history():
 # =============================================================================
 # === HELIUS API — Données blockchain Solana en temps réel ===
 # =============================================================================
+# HELIUS_API_KEY / BIRDEYE_API_KEY : lus dans config.py via os.getenv uniquement (secrets Render / .env).
 
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
 HELIUS_BASE = "https://api.helius.xyz/v0"
 LAMPORTS_PER_SOL = 1_000_000_000
 
-# Configuration Birdeye & RPC pour fallback pricing
-BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "")
+# Birdeye (optionnel) + RPC public fallback
 BIRDEYE_BASE = "https://api.birdeye.so/v1"
 RPC_MAINNET = "https://rpc.ankr.com/solana"  # RPC gratuit pour fallback
 
 
 def _helius_key() -> str:
-    """Vérifie que la clé Helius est configurée."""
+    """Vérifie que la clé Helius est configurée (variable d’environnement, jamais en dur dans le code)."""
     if not HELIUS_API_KEY:
-        raise HTTPException(status_code=500, detail="HELIUS_API_KEY manquante dans le fichier .env")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{ENV_NAME_HELIUS_API_KEY} manquante : définissez-la comme secret sur Render "
+                "ou dans .env en local. Aucune clé ne doit figurer dans le dépôt Git."
+            ),
+        )
     return HELIUS_API_KEY
 
 

@@ -10,18 +10,29 @@
 1. Crée un **Web Service** sur [Render](https://render.com), branche ton dépôt.
 2. Si le repo contient plusieurs dossiers, mets **Root Directory** sur `fichier/meme_coin_tracker` (ou le chemin réel vers ce projet).
 3. Tu peux importer le blueprint : fichier `render.yaml` à la racine du service.
-4. Variables d’environnement :
-   - `HELIUS_API_KEY` (obligatoire)
-   - **`ENV=production`** — en-têtes (CSP, HSTS, etc.), `/docs` et `/openapi.json` désactivés, rate-limits, CORS et méthodes/en-têtes restreints.
-   - **Sur Render**, la plateforme injecte **`RENDER_EXTERNAL_URL`** et **`RENDER_EXTERNAL_HOSTNAME`** : le backend les utilise **automatiquement** pour `ALLOWED_ORIGINS` et `TRUSTED_HOSTS` (tu n’as rien à copier à la main si tu n’as qu’un seul service qui sert le front + l’API).
-   - **`ALLOWED_ORIGINS`** — optionnel ; à ajouter si tu as un **front sur un autre domaine** (ex. Vercel), en plus de l’URL Render : `https://ton-app.onrender.com,https://ton-front.vercel.app`
-   - **`TRUSTED_HOSTS`** — optionnel sur Render (complété auto via `RENDER_EXTERNAL_HOSTNAME` + `localhost` + `127.0.0.1`). À compléter sur un VPS.
-   - Optionnel : `SQLITE_DB_PATH` = chemin absolu du fichier SQLite si tu montes un **disque persistant** Render (sinon la base est perdue au redémarrage sur l’offre gratuite)
+4. **Secrets et config perso : uniquement dans Render** (pas dans Git, pas dans `render.yaml` en clair). Dans le service → **Environment** → **Add Environment Variable** → coche **Secret** pour chaque clé / mot de passe / URL sensible. Le `render.yaml` ne contient que `sync: false` pour ces noms : les valeurs vivent sur le tableau de bord et ne sont pas resynchronisées depuis le dépôt.
+
+### Variables à renseigner sur Render (toutes optionnelles sauf mention)
+
+| Variable | Secret ? | Rôle |
+|----------|----------|------|
+| `HELIUS_API_KEY` | Oui | Obligatoire pour swaps, soldes, RPC Helius. |
+| `BIRDEYE_API_KEY` | Oui | Optionnel (prix / fallback). |
+| `API_KEY` | Oui | Optionnel : si défini **et** `ENV=production`, toutes les routes `/api/*` exigent l’en-tête `X-API-Key` **sauf** `/api/health` (health check Render). **Ne pas** mettre cette clé dans le JS du navigateur : l’app SPA ne l’envoie pas ; réserve-la à des scripts ou à l’admin. |
+| `SQLITE_DB_PATH` | Selon cas | Chemin absolu SQLite si disque persistant (ex. `/mnt/data/meme_coins.db`). |
+| `DATABASE_URL` / `DATABASE_MODE` / `POSTGRES_*` | Oui si mots de passe | Uniquement si tu utilises Postgres (hors `main.py` SQLite par défaut). |
+| `ALLOWED_ORIGINS` | Peut contenir des URLs perso | Optionnel : front sur un autre domaine (CSV), en plus de l’URL Render. |
+| `TRUSTED_HOSTS` | Idem | Optionnel sur Render (hôte Render injecté automatiquement). |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `DISCORD_WEBHOOK_URL` | Oui | Optionnel (alertes). |
+
+Déjà fixées par le blueprint (non secrètes) : `ENV=production`, `PYTHON_VERSION`. **Injectées par Render sans action** : `RENDER_EXTERNAL_URL`, `RENDER_EXTERNAL_HOSTNAME`, `PORT`.
+
+Avec **`ENV=production`** : en-têtes (CSP, HSTS, etc.), `/docs`, `/redoc` et `/openapi.json` sont **désactivés** ; CORS et Trusted Host sont stricts.
 
 ### Sécurité (rappel)
 
-- Le **JavaScript / HTML** du navigateur est toujours **visible** (outils développeur) : on ne peut pas « cacher » le code front. Les **secrets** (Helius, mots de passe utilisateurs hashés) restent côté **serveur** et **`.env`** (jamais commité).
-- **`API_KEY` + `X-API-Key`** : utile pour des **clients machine-à-machine** uniquement ; ne mets **pas** cette clé dans le front public.
+- Le **JavaScript / HTML** du navigateur reste lisible dans les outils développeur : seules les **clés serveur** sur Render (secrets) et la **base** côté disque sont protégées. Ne mets **jamais** Helius, Birdeye ou `API_KEY` dans `api-config.js`, `app.js` ou tout fichier statique.
+- En local, copie `backend/.env.example` vers `backend/.env` (fichier ignoré par Git).
 
 ## Neon (PostgreSQL)
 
