@@ -117,7 +117,7 @@
         .dash-hero-card {
             background: linear-gradient(145deg, rgba(255,255,255,0.95) 0%, rgba(254, 252, 232, 0.92) 100%);
         }
-        #dashboard, #tokens-grid { transition: opacity 0.12s ease-out; }
+        #dashboard, #dashboard-mobile-hero, #dashboard-mobile-rest, #tokens-grid { transition: opacity 0.12s ease-out; }
         .animate-pulse-slow {
             animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
         }
@@ -185,44 +185,68 @@
                 border-radius: 0.75rem;
                 max-height: 12rem;
             }
-            /* Empêche texte + icône de se chevaucher */
+            /* Empêche texte + icône de se chevaucher (dashboard desktop + blocs mobile-only) */
             #dashboard .flex.items-center.justify-between,
-            #dashboard .flex.items-start.justify-between {
+            #dashboard .flex.items-start.justify-between,
+            #dashboard-mobile-hero .flex.items-center.justify-between,
+            #dashboard-mobile-hero .flex.items-start.justify-between,
+            #dashboard-mobile-rest .flex.items-center.justify-between,
+            #dashboard-mobile-rest .flex.items-start.justify-between {
                 gap: 0.5rem;
                 align-items: flex-start;
             }
             #dashboard .flex.items-center.justify-between > div:first-child,
-            #dashboard .flex.items-start.justify-between > div:first-child {
+            #dashboard .flex.items-start.justify-between > div:first-child,
+            #dashboard-mobile-hero .flex.items-center.justify-between > div:first-child,
+            #dashboard-mobile-hero .flex.items-start.justify-between > div:first-child,
+            #dashboard-mobile-rest .flex.items-center.justify-between > div:first-child,
+            #dashboard-mobile-rest .flex.items-start.justify-between > div:first-child {
                 min-width: 0;
                 flex: 1 1 0%;
                 overflow-wrap: anywhere;
                 word-break: break-word;
             }
-            #dashboard .rounded-full.shrink-0 {
+            #dashboard .rounded-full.shrink-0,
+            #dashboard-mobile-hero .rounded-full.shrink-0,
+            #dashboard-mobile-rest .rounded-full.shrink-0 {
                 padding: 0.65rem !important;
                 align-self: flex-start;
                 margin-top: 0.125rem;
             }
-            #dashboard .rounded-full.shrink-0 i {
+            #dashboard .rounded-full.shrink-0 i,
+            #dashboard-mobile-hero .rounded-full.shrink-0 i,
+            #dashboard-mobile-rest .rounded-full.shrink-0 i {
                 font-size: 1.1rem !important;
             }
             /* Chiffres dashboard un peu plus compacts sur petit écran */
             #dashboard p.text-2xl,
-            #dashboard p.text-3xl {
+            #dashboard p.text-3xl,
+            #dashboard-mobile-hero p.text-2xl,
+            #dashboard-mobile-hero p.text-3xl,
+            #dashboard-mobile-rest p.text-2xl,
+            #dashboard-mobile-rest p.text-3xl {
                 font-size: 1.15rem;
                 line-height: 1.25;
             }
             #dashboard .dash-hero-card p.text-2xl,
             #dashboard .dash-hero-card p.text-3xl,
             #dashboard .dash-hero-card p.md\:text-4xl,
-            #dashboard .dash-hero-card p.lg\:text-5xl {
+            #dashboard .dash-hero-card p.lg\:text-5xl,
+            #dashboard-mobile-hero .dash-hero-card p.text-2xl,
+            #dashboard-mobile-hero .dash-hero-card p.text-3xl,
+            #dashboard-mobile-hero .dash-hero-card p.md\:text-4xl,
+            #dashboard-mobile-hero .dash-hero-card p.lg\:text-5xl {
                 font-size: 1.35rem !important;
                 line-height: 1.2;
             }
             #dashboard [data-tx-filter="net"] p.text-2xl,
             #dashboard [data-tx-filter="net"] p.text-3xl,
             #dashboard [data-tx-filter="net"] p.md\:text-4xl,
-            #dashboard [data-tx-filter="net"] p.lg\:text-5xl {
+            #dashboard [data-tx-filter="net"] p.lg\:text-5xl,
+            #dashboard-mobile-hero [data-tx-filter="net"] p.text-2xl,
+            #dashboard-mobile-hero [data-tx-filter="net"] p.text-3xl,
+            #dashboard-mobile-hero [data-tx-filter="net"] p.md\:text-4xl,
+            #dashboard-mobile-hero [data-tx-filter="net"] p.lg\:text-5xl {
                 font-size: 1.2rem !important;
                 line-height: 1.2;
             }
@@ -481,28 +505,30 @@
             </div>
         </div>
 
-        <!-- Dashboard Stats -->
-        <div id="dashboard" class="flex flex-col gap-6 lg:grid lg:grid-cols-12 lg:gap-6 mb-6 items-stretch">
-            <!-- Stats cards will be injected here -->
+        <!-- Dashboard + tokens : mobile = résumé → tokens → détail ; desktop (lg+) inchangé : dashboard grille puis tokens -->
+        <div id="portfolio-stack" class="flex flex-col gap-6 mb-8 w-full min-w-0">
+            <div id="dashboard-mobile-hero" class="order-1 flex flex-col gap-4 lg:hidden min-w-0"></div>
+            <div id="dashboard" class="order-1 hidden lg:grid lg:grid-cols-12 lg:gap-6 items-stretch w-full min-w-0">
+                <!-- Stats desktop (lg+) injectées ici -->
+            </div>
+            <div class="order-2 flex flex-col gap-2 sm:gap-3 min-w-0">
+                <div class="flex flex-col gap-2 sm:gap-3 sm:flex-row sm:justify-between sm:items-center">
+                    <h2 class="text-lg sm:text-3xl font-bold text-white drop-shadow pr-1">Mes Tokens</h2>
+                    <button id="add-token-btn" class="btn-mint px-5 sm:px-6 py-3 rounded-xl font-semibold shadow-lg transition-all w-full sm:w-auto min-h-[44px] shrink-0">
+                        <i class="fas fa-plus mr-2"></i>Ajouter un Token
+                    </button>
+                </div>
+                <div id="tokens-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                    <!-- Token cards will be injected here -->
+                </div>
+            </div>
+            <div id="dashboard-mobile-rest" class="order-3 flex flex-col gap-4 lg:hidden min-w-0"></div>
         </div>
 
         <!-- Cartes Envois & Reçus (chargées automatiquement) -->
         <div id="transfers-summary" class="hidden mb-8">
             <h2 class="text-base sm:text-2xl font-bold text-white mb-3 sm:mb-4 drop-shadow leading-snug">&#x21C4; Flux de l&apos;adresse</h2>
             <div id="transfers-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"></div>
-        </div>
-
-        <!-- Add Token Button -->
-        <div class="mb-4 sm:mb-6 flex flex-col gap-2 sm:gap-3 sm:flex-row sm:justify-between sm:items-center">
-            <h2 class="text-lg sm:text-3xl font-bold text-white drop-shadow pr-1">Mes Tokens</h2>
-            <button id="add-token-btn" class="btn-mint px-5 sm:px-6 py-3 rounded-xl font-semibold shadow-lg transition-all w-full sm:w-auto min-h-[44px] shrink-0">
-                <i class="fas fa-plus mr-2"></i>Ajouter un Token
-            </button>
-        </div>
-
-        <!-- Tokens Cards -->
-        <div id="tokens-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 mb-8">
-            <!-- Token cards will be injected here -->
         </div>
 
         <!-- Charts Section (génération à la demande — au-dessus de l’historique des transactions) -->
@@ -833,6 +859,6 @@
     </div>
 
     <script src="api-config.js?v=1"></script>
-    <script src="app.js?v=26"></script>
+    <script src="app.js?v=27"></script>
 </body>
 </html>

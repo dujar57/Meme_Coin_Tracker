@@ -1945,7 +1945,10 @@ function renderDashboard(data, txs = []) {
             : 'Définissez d’abord le total dépensé pour activer le comparatif en %.';
 
         const dashboard = document.getElementById('dashboard');
-        dashboard.className = 'flex flex-col gap-6 lg:grid lg:grid-cols-12 lg:gap-6 mb-6 items-stretch';
+        const mobileHero = document.getElementById('dashboard-mobile-hero');
+        const mobileRest = document.getElementById('dashboard-mobile-rest');
+        if (!dashboard || !mobileHero || !mobileRest) return;
+        dashboard.className = 'order-1 hidden lg:grid lg:grid-cols-12 lg:gap-6 items-stretch w-full min-w-0';
         const cardStd = 'glass rounded-xl p-4 sm:p-6 shadow-md card-hover transition-all';
         const flipFront = 'dashboard-flip-front glass rounded-xl p-3 sm:p-4 shadow-md card-hover transition-all flex items-center';
         const flipBack = 'dashboard-flip-back glass rounded-xl p-1 shadow-md overflow-hidden';
@@ -1954,9 +1957,7 @@ function renderDashboard(data, txs = []) {
         const pnlLatentNet = (data.total_gain ?? 0) - (data.total_loss ?? 0);
         const pnlFigedPos = pnlFigedNet >= 0;
         const pnlLatentPos = pnlLatentNet >= 0;
-        dashboard.innerHTML = `
-            <!-- Colonne gauche (mobile: après le centre) -->
-            <div class="order-3 lg:order-none lg:col-span-3 lg:row-span-2 lg:col-start-1 lg:row-start-1 flex flex-col gap-6">
+        const leftColInner = `
                 <div class="dashboard-flip">
                     <div class="${cardStd}">
                         <div class="flex items-center justify-between gap-2">
@@ -2007,10 +2008,8 @@ function renderDashboard(data, txs = []) {
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- Centre : Total Patrimoine (hero) -->
-            <div class="order-1 lg:order-none lg:col-span-6 lg:col-start-4 lg:row-start-1">
+        `;
+        const patrimoineFlip = `
                 <div class="dashboard-flip h-full">
                     <div class="glass dash-hero-card rounded-2xl p-5 sm:p-8 shadow-lg card-hover transition-all border border-amber-200/40 h-full min-h-[11rem] flex items-center">
                         <div class="flex items-center justify-between w-full gap-3 sm:gap-4">
@@ -2025,10 +2024,8 @@ function renderDashboard(data, txs = []) {
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- Centre : Résultat Net (hero + flip) -->
-            <div class="order-2 lg:order-none lg:col-span-6 lg:col-start-4 lg:row-start-2 dashboard-flip dashboard-flip-flipable dash-hero-flip cursor-pointer" data-tx-filter="net" title="Résultat net = latent + figé — survol : détail des ventes">
+        `;
+        const netFlipInner = `
                 <div class="dashboard-flip-inner">
                     <div class="${flipFront} hover:ring-2 hover:ring-teal-400/50 min-h-0 h-full border border-teal-200/30">
                         <div class="flex items-center justify-between w-full gap-3 px-2">
@@ -2061,10 +2058,13 @@ function renderDashboard(data, txs = []) {
                         ${buildDashboardCardTableBack('net', txs)}
                     </div>
                 </div>
-            </div>
-
-            <!-- Colonne droite -->
-            <div class="order-4 lg:order-none lg:col-span-3 lg:col-start-10 lg:row-span-2 lg:row-start-1 flex flex-col gap-6">
+        `;
+        const netOuterDesktop =
+            'order-2 lg:order-none lg:col-span-6 lg:col-start-4 lg:row-start-2 dashboard-flip dashboard-flip-flipable dash-hero-flip cursor-pointer';
+        const netOuterMobile = 'w-full min-w-0 dashboard-flip dashboard-flip-flipable dash-hero-flip cursor-pointer';
+        const netBlockDesktop = `<div class="${netOuterDesktop}" data-tx-filter="net" title="Résultat net = latent + figé — survol : détail des ventes">${netFlipInner}</div>`;
+        const netBlockMobile = `<div class="${netOuterMobile}" data-tx-filter="net" title="Résultat net = latent + figé — survol : détail des ventes">${netFlipInner}</div>`;
+        const rightColInner = `
                 <div class="dashboard-flip cursor-pointer" data-tx-filter="gains" title="P/L latent sur ce que vous détenez — clic : historique des ventes gagnantes">
                     <div class="${cardStd} hover:ring-2 hover:ring-emerald-400/50">
                         <div class="flex items-center justify-between gap-2">
@@ -2133,10 +2133,8 @@ function renderDashboard(data, txs = []) {
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- PnL net figé vs PnL net actuel (latent) -->
-            <div class="order-5 lg:order-none lg:col-span-12 lg:row-start-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+        `;
+        const pnlTwoCards = `
                 <div class="${cardStd} border border-amber-300/35 bg-gradient-to-br from-amber-50/90 to-white/80">
                     <div class="flex items-start justify-between gap-3">
                         <div class="min-w-0 flex-1">
@@ -2182,13 +2180,25 @@ function renderDashboard(data, txs = []) {
                         </div>
                     </div>
                 </div>
-            </div>
         `;
+        const htmlLeftDesktop = `<div class="order-3 lg:order-none lg:col-span-3 lg:row-span-2 lg:col-start-1 lg:row-start-1 flex flex-col gap-6">${leftColInner}</div>`;
+        const htmlLeftMobile = `<div class="flex flex-col gap-6 w-full min-w-0">${leftColInner}</div>`;
+        const htmlPatrimoineDesktop = `<div class="order-1 lg:order-none lg:col-span-6 lg:col-start-4 lg:row-start-1">${patrimoineFlip}</div>`;
+        const htmlPatrimoineMobile = `<div class="w-full min-w-0">${patrimoineFlip}</div>`;
+        const htmlRightDesktop = `<div class="order-4 lg:order-none lg:col-span-3 lg:col-start-10 lg:row-span-2 lg:row-start-1 flex flex-col gap-6">${rightColInner}</div>`;
+        const htmlRightMobile = `<div class="flex flex-col gap-6 w-full min-w-0">${rightColInner}</div>`;
+        const htmlPnlDesktop = `<div class="order-5 lg:order-none lg:col-span-12 lg:row-start-3 grid grid-cols-1 md:grid-cols-2 gap-4">${pnlTwoCards}</div>`;
+        const htmlPnlMobile = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4 w-full min-w-0">${pnlTwoCards}</div>`;
+
+        mobileHero.innerHTML = htmlPatrimoineMobile + netBlockMobile + htmlPnlMobile;
+        mobileRest.innerHTML = htmlLeftMobile + htmlRightMobile;
+        dashboard.innerHTML = htmlLeftDesktop + htmlPatrimoineDesktop + netBlockDesktop + htmlRightDesktop + htmlPnlDesktop;
     // Clic sur la carte (pas sur le bouton Agrandir — géré à part avec stopPropagation)
-    dashboard.querySelectorAll('.dashboard-flip[data-tx-filter]').forEach(el => {
+    const stack = document.getElementById('portfolio-stack');
+    (stack || dashboard).querySelectorAll('.dashboard-flip[data-tx-filter]').forEach(el => {
         el.addEventListener('click', () => showDashboardCardTransactions(el.dataset.txFilter));
     });
-    dashboard.querySelectorAll('.dashboard-flip-expand-btn').forEach(btn => {
+    (stack || dashboard).querySelectorAll('.dashboard-flip-expand-btn').forEach(btn => {
         btn.addEventListener('click', e => {
             e.stopPropagation();
             e.preventDefault();
@@ -3680,7 +3690,12 @@ function showNotification(message, type = 'info') {
 // Afficher un dashboard vide au démarrage
 function displayEmptyDashboard() {
     const dashboard = document.getElementById('dashboard');
-    dashboard.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-6';
+    const mobileHero = document.getElementById('dashboard-mobile-hero');
+    const mobileRest = document.getElementById('dashboard-mobile-rest');
+    if (mobileHero) mobileHero.innerHTML = '';
+    if (mobileRest) mobileRest.innerHTML = '';
+    if (!dashboard) return;
+    dashboard.className = 'order-1 hidden lg:grid lg:grid-cols-3 lg:gap-6 gap-6 w-full min-w-0';
     const emptyCard = (icon, iconBg, iconColor, label, sub = '') => `
         <div class="glass rounded-xl p-4 sm:p-6 shadow-md card-hover transition-all">
             <div class="flex items-center justify-between gap-3">
@@ -3818,7 +3833,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (!walletRestored) showWelcomePage();
 
-    document.getElementById('dashboard').addEventListener('click', (e) => {
+    document.getElementById('portfolio-stack')?.addEventListener('click', (e) => {
         if (e.target.closest('[data-action="open-ref-capital"]')) {
             e.preventDefault();
             openReferenceCapitalModal();
