@@ -3303,10 +3303,27 @@ document.getElementById('token-form').addEventListener('submit', async (e) => {
     const purchasedTokens = parseFloat(document.getElementById('token-purchased').value) || 0;
     const purchasePrice = parseFloat(document.getElementById('token-price').value) || 0;
     const ucRaw = (document.getElementById('token-user-cost-usd')?.value || '').trim().replace(',', '.');
+
+    let existing = null;
+    if (tokenId) {
+        try {
+            const er = await fetch(`${API_URL}/tokens/${tokenId}`);
+            if (er.ok) existing = await er.json();
+        } catch (_) { /* ignore */ }
+    }
+
     let user_position_cost_usd = null;
     if (ucRaw !== '') {
         const u = parseFloat(ucRaw);
-        if (Number.isFinite(u) && u > 0) user_position_cost_usd = u;
+        if (u === 0) user_position_cost_usd = null;
+        else if (Number.isFinite(u) && u > 0) user_position_cost_usd = u;
+    } else if (
+        tokenId &&
+        existing &&
+        existing.user_position_cost_usd != null &&
+        Number(existing.user_position_cost_usd) > 0
+    ) {
+        user_position_cost_usd = Number(existing.user_position_cost_usd);
     }
 
     const tokenData = {
@@ -3329,23 +3346,16 @@ document.getElementById('token-form').addEventListener('submit', async (e) => {
         user_position_cost_usd
     };
 
-    if (tokenId) {
-        try {
-            const er = await fetch(`${API_URL}/tokens/${tokenId}`);
-            if (er.ok) {
-                const ex = await er.json();
-                tokenData.current_tokens = ex.current_tokens ?? tokenData.current_tokens;
-                tokenData.purchased_tokens = ex.purchased_tokens ?? tokenData.purchased_tokens;
-                tokenData.current_price = ex.current_price ?? tokenData.current_price;
-                tokenData.current_value = ex.current_value ?? tokenData.current_value;
-                tokenData.sol_usd_at_buy = ex.sol_usd_at_buy;
-                tokenData.gain = ex.gain ?? 0;
-                tokenData.loss = ex.loss ?? 0;
-                tokenData.sold_tokens = ex.sold_tokens ?? 0;
-                if (ex.invested_amount != null) tokenData.invested_amount = ex.invested_amount;
-            }
-        } catch (_) { /* ignore */ }
-        tokenData.user_position_cost_usd = user_position_cost_usd;
+    if (tokenId && existing) {
+        tokenData.current_tokens = existing.current_tokens ?? tokenData.current_tokens;
+        tokenData.purchased_tokens = existing.purchased_tokens ?? tokenData.purchased_tokens;
+        tokenData.current_price = existing.current_price ?? tokenData.current_price;
+        tokenData.current_value = existing.current_value ?? tokenData.current_value;
+        tokenData.sol_usd_at_buy = existing.sol_usd_at_buy;
+        tokenData.gain = existing.gain ?? 0;
+        tokenData.loss = existing.loss ?? 0;
+        tokenData.sold_tokens = existing.sold_tokens ?? 0;
+        if (existing.invested_amount != null) tokenData.invested_amount = existing.invested_amount;
     }
     
     try {
