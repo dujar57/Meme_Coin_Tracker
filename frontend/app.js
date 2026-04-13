@@ -2542,13 +2542,25 @@ async function renderTokens(allTokens, options = {}) {
             const buy    = token.purchase_price_usd ?? token.purchase_price ?? 0;
             const currentValue = token.current_value || 0;
 
-            // Gain vs prix d'achat — tout en USD
+            // Gain vs prix d'achat — tout en USD (même net que le dashboard / P/L latent HIFO)
             const profitLoss = (token.gain || 0) - (token.loss || 0);
+            const hasHifoPct = token.latent_pnl_pct != null && Number.isFinite(Number(token.latent_pnl_pct));
+            const hifoPctNum = hasHifoPct ? Number(token.latent_pnl_pct) : null;
             // Helius : invested_amount en SOL → multiplier par sol_usd_at_buy ; Manuel : déjà en USD
             const invested_usd = token.sol_usd_at_buy
                 ? (token.invested_amount || 0) * token.sol_usd_at_buy
                 : (token.invested_amount || 0);
-            const profitLossPct = invested_usd > 0 ? ((profitLoss / invested_usd) * 100).toFixed(2) : 0;
+            // % vs coût HIFO des lots détenus (aligné carte P/L latent), pas vs total historique investi
+            let profitLossPct;
+            if (hasHifoPct && hifoPctNum != null) {
+                profitLossPct = hifoPctNum.toFixed(2);
+            } else if (invested_usd > 0) {
+                profitLossPct = ((profitLoss / invested_usd) * 100).toFixed(2);
+            } else {
+                const ct = Number(token.current_tokens) || 0;
+                const costOpen = buy > 0 && ct > 0 ? buy * ct : 0;
+                profitLossPct = costOpen > 0 ? ((profitLoss / costOpen) * 100).toFixed(2) : '0.00';
+            }
 
             // Gain vs 24h
             const p24h = token.price_24h_ago;
@@ -2564,8 +2576,6 @@ async function renderTokens(allTokens, options = {}) {
             const hifoNetTextClass =
                 hifoNet > 0 ? 'text-emerald-600' : hifoNet < 0 ? 'text-rose-600' : 'text-slate-700';
             const hifoNetSign = hifoNet > 0 ? '+' : '';
-            const hasHifoPct = token.latent_pnl_pct != null && Number.isFinite(Number(token.latent_pnl_pct));
-            const hifoPctNum = hasHifoPct ? Number(token.latent_pnl_pct) : null;
             const hifoPctTextClass = !hasHifoPct
                 ? 'text-slate-400'
                 : hifoPctNum > 0
