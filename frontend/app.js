@@ -2616,6 +2616,7 @@ async function renderTokens(allTokens, options = {}) {
                         <div class="bg-teal-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-teal-500 mb-1">Prix d'achat</p>
                             <p class="font-bold text-teal-700 text-sm sm:text-base break-all">${formatPrice(buy)}</p>
+                            ${token.user_position_cost_usd != null && Number(token.user_position_cost_usd) > 0 ? `<p class="text-[10px] text-amber-700 mt-1 font-medium">Coût réel saisi</p>` : ''}
                         </div>
                         <div class="bg-cyan-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-cyan-500 mb-1">Prix actuel</p>
@@ -3283,6 +3284,8 @@ document.getElementById('add-token-btn').addEventListener('click', () => {
     document.getElementById('modal-title').textContent = 'Ajouter un Token';
     document.getElementById('token-form').reset();
     document.getElementById('token-id').value = '';
+    const ucost = document.getElementById('token-user-cost-usd');
+    if (ucost) ucost.value = '';
     document.getElementById('token-modal').classList.remove('hidden');
 });
 
@@ -3299,7 +3302,13 @@ document.getElementById('token-form').addEventListener('submit', async (e) => {
     const tokenId = document.getElementById('token-id').value;
     const purchasedTokens = parseFloat(document.getElementById('token-purchased').value) || 0;
     const purchasePrice = parseFloat(document.getElementById('token-price').value) || 0;
-    
+    const ucRaw = (document.getElementById('token-user-cost-usd')?.value || '').trim().replace(',', '.');
+    let user_position_cost_usd = null;
+    if (ucRaw !== '') {
+        const u = parseFloat(ucRaw);
+        if (Number.isFinite(u) && u > 0) user_position_cost_usd = u;
+    }
+
     const tokenData = {
         name: document.getElementById('token-name').value,
         address: document.getElementById('token-address').value,
@@ -3316,8 +3325,28 @@ document.getElementById('token-form').addEventListener('submit', async (e) => {
         current_value: purchasedTokens * purchasePrice,
         gain: 0,
         loss: 0,
-        sold_tokens: 0
+        sold_tokens: 0,
+        user_position_cost_usd
     };
+
+    if (tokenId) {
+        try {
+            const er = await fetch(`${API_URL}/tokens/${tokenId}`);
+            if (er.ok) {
+                const ex = await er.json();
+                tokenData.current_tokens = ex.current_tokens ?? tokenData.current_tokens;
+                tokenData.purchased_tokens = ex.purchased_tokens ?? tokenData.purchased_tokens;
+                tokenData.current_price = ex.current_price ?? tokenData.current_price;
+                tokenData.current_value = ex.current_value ?? tokenData.current_value;
+                tokenData.sol_usd_at_buy = ex.sol_usd_at_buy;
+                tokenData.gain = ex.gain ?? 0;
+                tokenData.loss = ex.loss ?? 0;
+                tokenData.sold_tokens = ex.sold_tokens ?? 0;
+                if (ex.invested_amount != null) tokenData.invested_amount = ex.invested_amount;
+            }
+        } catch (_) { /* ignore */ }
+        tokenData.user_position_cost_usd = user_position_cost_usd;
+    }
     
     try {
         const url = tokenId ? `${API_URL}/tokens/${tokenId}` : `${API_URL}/tokens`;
@@ -3462,6 +3491,11 @@ async function editToken(id) {
         document.getElementById('token-mcap').value = token.mcap_target || '';
         document.getElementById('token-detection').value = token.detection_date || '';
         document.getElementById('token-comments').value = token.comments || '';
+        const ucel = document.getElementById('token-user-cost-usd');
+        if (ucel) {
+            const v = token.user_position_cost_usd;
+            ucel.value = v != null && Number(v) > 0 ? String(v) : '';
+        }
         
         document.getElementById('token-modal').classList.remove('hidden');
     } catch (error) {

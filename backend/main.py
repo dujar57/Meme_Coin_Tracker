@@ -623,6 +623,36 @@ def _hifo_per_token_gain_loss_and_open_avg(
     return out, open_avg_usd
 
 
+def _overlay_user_position_cost_usd(t: dict) -> None:
+    """
+    Si l'utilisateur a saisi user_position_cost_usd (coût total USD de la position ouverte),
+    l'affichage carte utilise ce montant pour prix d'achat USD/token et P/L latent — pas l'import HIFO.
+    L'historique des transactions / HIFO des ventes reste inchangé.
+    """
+    ct = float(t.get("current_tokens") or 0)
+    if ct <= 1e-12:
+        return
+    if str(t.get("address") or "") == str(SOL_MINT):
+        return
+    raw = t.get("user_position_cost_usd")
+    if raw is None:
+        return
+    try:
+        ucost = float(raw)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(ucost) or ucost <= 1e-9:
+        return
+    cv = float(t.get("current_value") or 0)
+    cp = float(t.get("current_price") or 0)
+    market = cv if cv > 0 else ct * cp
+    ux = market - ucost
+    t["purchase_price_usd"] = ucost / ct
+    t["latent_pnl_pct"] = round((100.0 * ux / ucost), 4) if ucost > 1e-9 else None
+    t["gain"] = max(0.0, ux)
+    t["loss"] = abs(min(0.0, ux))
+
+
 def _hifo_per_token_gain_loss_dict(cursor, wallet: str, sol_usd: float) -> dict[int, dict[str, float]]:
     """
     P/L **latent** uniquement (positions encore ouvertes) : valeur actuelle − coût HIFO des lots restants.
@@ -896,6 +926,8 @@ class Token(BaseModel):
     sold_amount: Optional[float] = 0
     price_is_stale: Optional[bool] = False
     price_warning: Optional[str] = None
+    # Coût total USD que tu attribues à la position ouverte (optionnel) — carte token uniquement
+    user_position_cost_usd: Optional[float] = None
 
 class Sale(BaseModel):
     token_id: int
@@ -1845,6 +1877,8 @@ async def startup_event():
                 c.execute("ALTER TABLE tokens ADD COLUMN price_is_stale BOOLEAN DEFAULT 0")
             if "price_warning" not in token_cols:
                 c.execute("ALTER TABLE tokens ADD COLUMN price_warning TEXT DEFAULT NULL")
+            if "user_position_cost_usd" not in token_cols:
+                c.execute("ALTER TABLE tokens ADD COLUMN user_position_cost_usd REAL DEFAULT NULL")
             # Migration : attribuer le wallet de settings aux tokens qui n'en ont pas
             try:
                 c.execute("SELECT value FROM settings WHERE key = 'wallet_address'")
@@ -2326,6 +2360,7 @@ async def get_tokens(wallet: Optional[str] = Query(None)):
                 lp = hid.get("latent_pnl_pct")
                 if lp is not None and isinstance(lp, (int, float)) and math.isfinite(float(lp)):
                     t["latent_pnl_pct"] = round(float(lp), 4)
+            _overlay_user_position_cost_usd(t)
             result.append(t)
         return result
 
@@ -2369,6 +2404,7 @@ async def get_token(token_id: int):
                 lp = hid.get("latent_pnl_pct")
                 if lp is not None and isinstance(lp, (int, float)) and math.isfinite(float(lp)):
                     t["latent_pnl_pct"] = round(float(lp), 4)
+        _overlay_user_position_cost_usd(t)
         return t
 
 @app.get("/api/tokens/{token_id}/purchases")
@@ -2467,14 +2503,14 @@ async def update_token(token_id: int, token: Token):
                 name=?, address=?, detection_date=?, comments=?, event=?, mcap_target=?,
                 purchase_date=?, current_tokens=?, purchased_tokens=?, purchase_price=?,
                 current_price=?, loss=?, gain=?, current_value=?, invested_amount=?,
-                sold_tokens=?, updated_at=CURRENT_TIMESTAMP
+                sold_tokens=?, user_position_cost_usd=?, updated_at=CURRENT_TIMESTAMP
             WHERE id=?
         """, (
             token.name, token.address, token.detection_date, token.comments,
             token.event, token.mcap_target, token.purchase_date, token.current_tokens,
             token.purchased_tokens, token.purchase_price, token.current_price,
             token.loss, token.gain, token.current_value, token.invested_amount,
-            token.sold_tokens, token_id
+            token.sold_tokens, token.user_position_cost_usd, token_id
         ))
         conn.commit()
         if cursor.rowcount == 0:

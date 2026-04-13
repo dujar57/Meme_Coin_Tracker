@@ -205,6 +205,7 @@ def init_postgres_schema(cursor: _PgCursorWrapper | Any) -> None:
             wallet_address TEXT NOT NULL DEFAULT '',
             price_is_stale INTEGER DEFAULT 0,
             price_warning TEXT DEFAULT NULL,
+            user_position_cost_usd DOUBLE PRECISION DEFAULT NULL,
             UNIQUE (address, wallet_address)
         )
         """,
@@ -404,6 +405,12 @@ def init_postgres_schema(cursor: _PgCursorWrapper | Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_purchases_wallet_active ON purchases(wallet_address, token_id) WHERE tokens_bought > 0 AND sol_spent > 0",
     ):
         cursor.execute(partial_sql)
+
+    tok_cols = postgres_table_columns(cursor, "tokens")
+    if "user_position_cost_usd" not in tok_cols:
+        cursor.execute(
+            "ALTER TABLE tokens ADD COLUMN user_position_cost_usd DOUBLE PRECISION DEFAULT NULL"
+        )
 
     try:
         cursor.execute("ANALYZE tokens")
