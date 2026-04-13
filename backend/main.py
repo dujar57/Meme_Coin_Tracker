@@ -940,6 +940,11 @@ def get_db():
         conn.close()
 
 
+def _bool_to_sql_int(v: Optional[bool]) -> int:
+    """Colonne price_is_stale : INTEGER côté Postgres ; bool Python → 0/1 (SQLite accepte aussi)."""
+    return 1 if v else 0
+
+
 def wipe_all_database_data(conn: sqlite3.Connection) -> list[str]:
     """
     Supprime toutes les lignes de chaque table utilisateur (schéma et index inchangés).
@@ -3735,7 +3740,7 @@ async def update_all_prices(
                     price_is_stale=?, price_warning=?,
                     updated_at=CURRENT_TIMESTAMP
                 WHERE id=?
-            """, (current_price_usd, current_value_usd, gain, loss, price_is_stale, price_warning, token['id']))
+            """, (current_price_usd, current_value_usd, gain, loss, _bool_to_sql_int(price_is_stale), price_warning, token['id']))
 
             # Historiser seulement si prix issu d'un fetch (évite doublons en boucle quick sur soldes nuls)
             if current_price_usd > 0 and not (quick and ct <= 0):
@@ -3832,6 +3837,8 @@ async def update_prices_for_tokens(body: UpdatePricesForTokensBody = Body(...), 
         updated = 0
         for token in tokens:
             current_price_usd = float(prices_map.get(token["address"]) or 0)
+            price_is_stale = False
+            price_warning = None
             if current_price_usd <= 0:
                 cursor.execute(
                     "SELECT price FROM price_history WHERE token_id = ? ORDER BY rowid DESC LIMIT 1",
@@ -3840,6 +3847,10 @@ async def update_prices_for_tokens(body: UpdatePricesForTokensBody = Body(...), 
                 last_price_row = cursor.fetchone()
                 if last_price_row:
                     current_price_usd = float(last_price_row["price"])
+                    price_is_stale = True
+                    price_warning = (
+                        f"⚠️ Token disparu de DexScreener. Prix utilisant le dernier prix connu : ${current_price_usd:.10g}"
+                    )
 
             current_value_usd = token["current_tokens"] * current_price_usd
             invested_usd_total = invested_map.get(token["id"], 0.0)
@@ -3855,7 +3866,7 @@ async def update_prices_for_tokens(body: UpdatePricesForTokensBody = Body(...), 
             cursor.execute("""
                 UPDATE tokens SET current_price=?, current_value=?, gain=?, loss=?,
                     price_is_stale=?, price_warning=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
-            """, (current_price_usd, current_value_usd, gain, loss, False, None, token["id"]))
+            """, (current_price_usd, current_value_usd, gain, loss, _bool_to_sql_int(price_is_stale), price_warning, token["id"]))
             if current_price_usd > 0:
                 cursor.execute("INSERT INTO price_history (token_id, price) VALUES (?, ?)", (token["id"], current_price_usd))
             updated += 1
