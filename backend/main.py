@@ -520,9 +520,9 @@ def _hifo_dashboard_gain_loss_net(
     cursor, wallet: str, sol_usd: float
 ) -> tuple[float, float, float, float, float]:
     """
-    total_gain / total_loss = P/L **latent** (varie avec cours / valorisation).
-    realized_* = P/L **figé** sur ventes : si toutes les ventes ont sales.hifo_pnl_usd (recalcul HIFO),
-    on somme ces montants (stable dans le temps). Sinon calcul live (peut bouger si taux SOL manquants).
+    total_gain / total_loss = P/L **latent** (varie avec cours / valorisation), aligné sur les cartes token :
+    coût saisi (user_position_cost_usd) ou coût auto achats/ventes si dispo, sinon coût HIFO des lots.
+    realized_* = P/L **figé** sur ventes (HIFO en base ou live).
     net_total = (ug + rg) − (ul + rl).
     Retourne (total_gain, total_loss, net_total, realized_gain_only, realized_loss_only).
     """
