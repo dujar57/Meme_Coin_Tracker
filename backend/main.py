@@ -6,7 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List
 from datetime import datetime, timezone
 import sqlite3
@@ -53,6 +53,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # Mint natif SOL / wSOL (même adresse sur Solana)
 SOL_MINT = "So11111111111111111111111111111111111111112"
+LAMPORTS_PER_SOL = 1_000_000_000
 # Prix Jupiter v3 : lite-api en priorité, secours api.jup.ag (voir config / variables d’env)
 def _jupiter_price_headers() -> dict:
     h = {"User-Agent": "MemeCoinTracker/1.0"}
@@ -164,6 +165,24 @@ def _estimate_swap_sol_spent_lamports(amounts: list[int]) -> int:
     if second > 0 and mx >= int(second * 1.45) and mx >= int(total * 0.52):
         return mx
     return total
+
+
+def _estimate_swap_wsol_spent_sol(amounts_sol: list[float]) -> float:
+    """Même idée que les envois natifs : plusieurs lignes wSOL sortantes → ne pas tout sommer aveuglément."""
+    if not amounts_sol:
+        return 0.0
+    lam: list[int] = []
+    for x in amounts_sol:
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            continue
+        if v <= 0:
+            continue
+        lam.append(max(1, int(round(v * LAMPORTS_PER_SOL))))
+    if not lam:
+        return 0.0
+    return _estimate_swap_sol_spent_lamports(lam) / LAMPORTS_PER_SOL
 
 
 def _helius_merge_token_transfers_by_mint(transfers: list) -> list:
@@ -836,6 +855,8 @@ async def api_key_middleware(request: Request, call_next):
 
 # === MODELS ===
 class Token(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     id: Optional[int] = None
     name: str
     address: str
@@ -1003,6 +1024,57 @@ def get_db():
 def _bool_to_sql_int(v: Optional[bool]) -> int:
     """Colonne price_is_stale : INTEGER côté Postgres ; bool Python → 0/1 (SQLite accepte aussi)."""
     return 1 if v else 0
+
+
+def _purchase_vwap_usd_by_token(cursor, wallet: str, sol_fallback: float) -> dict[int, float]:
+    """Coût moyen USD/token depuis les lots purchases (aligné Dex / explorer si sol_spent est bon)."""
+    w = (wallet or "").strip()
+    if len(w) < 20:
+        return {}
+    cursor.execute(
+        """
+        SELECT token_id,
+            COALESCE(SUM(sol_spent * COALESCE(NULLIF(sol_usd_at_buy, 0), ?)), 0) AS usd,
+            COALESCE(SUM(tokens_bought), 0) AS tb
+        FROM purchases
+        WHERE wallet_address = ? AND tokens_bought > 0 AND sol_spent > 0
+        GROUP BY token_id
+        """,
+        (sol_fallback, w),
+    )
+    out: dict[int, float] = {}
+    for r in cursor.fetchall():
+        try:
+            tid = int(r["token_id"])
+        except (TypeError, ValueError):
+            continue
+        tb = float(r["tb"] or 0)
+        if tb <= 0:
+            continue
+        usd = float(r["usd"] or 0)
+        if usd > 0:
+            out[tid] = usd / tb
+    return out
+
+
+def _purchase_vwap_usd_for_token_id(cursor, token_id: int, sol_fallback: float) -> Optional[float]:
+    cursor.execute(
+        """
+        SELECT COALESCE(SUM(sol_spent * COALESCE(NULLIF(sol_usd_at_buy, 0), ?)), 0) AS usd,
+               COALESCE(SUM(tokens_bought), 0) AS tb
+        FROM purchases
+        WHERE token_id = ? AND tokens_bought > 0 AND sol_spent > 0
+        """,
+        (sol_fallback, token_id),
+    )
+    r = cursor.fetchone()
+    if not r:
+        return None
+    tb = float(r["tb"] or 0)
+    if tb <= 0:
+        return None
+    usd = float(r["usd"] or 0)
+    return (usd / tb) if usd > 0 else None
 
 
 def wipe_all_database_data(conn: sqlite3.Connection) -> list[str]:
@@ -2206,6 +2278,7 @@ async def get_tokens(wallet: Optional[str] = Query(None)):
         token_rows = list(cursor.fetchall())
         result = []
         wkey = str(wallet).strip()
+        vwap_usd = _purchase_vwap_usd_by_token(cursor, wkey, sol_usd)
         try:
             hifo_map = _hifo_per_token_gain_loss_dict(cursor, wkey, sol_usd)
         except Exception as e:
@@ -2215,7 +2288,12 @@ async def get_tokens(wallet: Optional[str] = Query(None)):
             t = dict(token)
             t["price_24h_ago"] = price_24h.get(t["id"])
             sol_at_buy = t.get("sol_usd_at_buy")
-            t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
+            tid = int(t["id"])
+            vw = vwap_usd.get(tid)
+            if vw is not None and vw > 0:
+                t["purchase_price_usd"] = vw
+            else:
+                t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
             hid = hifo_map.get(int(t["id"]))
             if hid is not None and str(t.get("address") or "") != str(SOL_MINT):
                 t["gain"] = hid["gain"]
@@ -2239,6 +2317,12 @@ async def get_token(token_id: int):
         if not token:
             raise HTTPException(status_code=404, detail="Token non trouvé")
         t = dict(token)
+        vw = _purchase_vwap_usd_for_token_id(cursor, token_id, sol_usd)
+        if vw is not None and vw > 0:
+            t["purchase_price_usd"] = vw
+        else:
+            sol_at_buy = t.get("sol_usd_at_buy")
+            t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
         wa = (t.get("wallet_address") or "").strip()
         if len(wa) >= 20 and str(t.get("address") or "") != str(SOL_MINT):
             hid = _hifo_per_token_gain_loss_dict(cursor, wa, sol_usd).get(token_id)
@@ -4404,7 +4488,6 @@ async def get_gains_history():
 # HELIUS_API_KEY / BIRDEYE_API_KEY : lus dans config.py via os.getenv uniquement (secrets Render / .env).
 
 HELIUS_BASE = "https://api.helius.xyz/v0"
-LAMPORTS_PER_SOL = 1_000_000_000
 
 # Birdeye (optionnel) + RPC public fallback
 BIRDEYE_BASE = "https://api.birdeye.so/v1"
@@ -4995,9 +5078,14 @@ async def helius_import_swaps(
                 wsol_received = sum(float(t.get("tokenAmount", 0) or 0) for t in token_transfers
                                     if t.get("toUserAccount") == wallet_address
                                     and t.get("mint") == SOL_MINT)
-                wsol_sent = sum(float(t.get("tokenAmount", 0) or 0) for t in token_transfers
-                                if t.get("fromUserAccount") == wallet_address
-                                and t.get("mint") == SOL_MINT)
+                wsol_sent_amounts = [
+                    float(t.get("tokenAmount", 0) or 0)
+                    for t in token_transfers
+                    if t.get("fromUserAccount") == wallet_address
+                    and t.get("mint") == SOL_MINT
+                    and float(t.get("tokenAmount", 0) or 0) > 0
+                ]
+                wsol_sent = sum(wsol_sent_amounts)
 
                 # ── Détection achat/vente ──────────────────────────────────
                 # Priorité au sens du SOL (plus fiable que les token transfers
@@ -5057,11 +5145,20 @@ async def helius_import_swaps(
                     # 2. nativeTransfers vers tiers hors Jito : exclut frais réseau + Jito tips
                     # 3. Fallback : nativeBalanceChange brut - frais réseau
                     if wsol_sent > 0:
-                        sol_spent = wsol_sent
+                        sol_spent = (
+                            _estimate_swap_wsol_spent_sol(wsol_sent_amounts)
+                            if len(wsol_sent_amounts) > 1
+                            else wsol_sent
+                        )
                     elif native_sol_out_lamports > 0:
                         sol_spent = _estimate_swap_sol_spent_lamports(native_sol_out_amounts) / LAMPORTS_PER_SOL
                     else:
                         sol_spent = max(0.0, (abs(wallet_sol_change) - fee_lamports) / LAMPORTS_PER_SOL)
+
+                    # Plafond : la somme des envois ne peut pas dépasser le SOL réellement quitté le wallet (hors frais tx)
+                    sol_cap_wallet = max(0.0, (abs(wallet_sol_change) - fee_lamports) / LAMPORTS_PER_SOL)
+                    if sol_spent > 0 and sol_cap_wallet > 1e-12 and sol_spent > sol_cap_wallet * 1.0001:
+                        sol_spent = sol_cap_wallet
 
                     if sol_spent == 0:
                         continue

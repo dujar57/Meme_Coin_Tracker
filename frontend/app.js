@@ -1529,9 +1529,10 @@ async function heliusImportSwaps() {
 async function heliusRepairPurchases() {
     if (!_checkWalletForHelius()) return;
     const ok = confirm(
-        'Corriger les montants des achats déjà en base ?\n\n' +
-            'Le serveur va parcourir jusqu’à 40 pages d’historique Helius, supprimer les anciennes lignes d’achat concernées et les réimporter avec la logique actuelle.\n\n' +
-            'Durée : environ 1 à 2 minutes selon l’historique.'
+        'Corriger les prix d’achat (SOL dépensé) des achats déjà importés ?\n\n' +
+            'Sans cette étape, la base garde les anciens montants : un simple déploiement serveur ne change rien.\n\n' +
+            'Le serveur parcourt jusqu’à 40 pages Helius, supprime les lignes d’achat concernées et les réimporte avec la logique actuelle (dont plafond par solde wallet).\n\n' +
+            'Durée : environ 1 à 2 minutes.'
     );
     if (!ok) return;
     _heliusStartLoading();
