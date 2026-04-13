@@ -31,6 +31,9 @@ from config import (
     ENV_NAME_SERVICE_API_KEY,
     HELIUS_API_KEY,
     IS_PROD,
+    JUPITER_API_KEY,
+    JUPITER_PRICE_V3_FALLBACK,
+    JUPITER_PRICE_V3_LITE,
     REQUIRE_API_KEY,
     TRUSTED_HOSTS,
     USE_POSTGRES,
@@ -50,8 +53,12 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # Mint natif SOL / wSOL (même adresse sur Solana)
 SOL_MINT = "So11111111111111111111111111111111111111112"
-# api.jup.ag/price/* → 401 sans clé API ; lite-api = endpoint public (Jupiter Price v3)
-JUPITER_LITE_PRICE_V3 = "https://lite-api.jup.ag/price/v3"
+# Prix Jupiter v3 : lite-api en priorité, secours api.jup.ag (voir config / variables d’env)
+def _jupiter_price_headers() -> dict:
+    h = {"User-Agent": "MemeCoinTracker/1.0"}
+    if JUPITER_API_KEY:
+        h["x-api-key"] = JUPITER_API_KEY
+    return h
 
 
 def _jupiter_parse_prices_json(payload: dict, mints: List[str]) -> dict[str, float]:
@@ -3222,13 +3229,21 @@ async def _get_sol_usd_price() -> float:
         
         async def _fetch_jupiter():
             try:
-                async with httpx.AsyncClient(timeout=3.0) as client:
-                    r = await client.get(f"{JUPITER_LITE_PRICE_V3}?ids={SOL_MINT}")
-                    if r.status_code == 200:
-                        parsed = _jupiter_parse_prices_json(r.json(), [SOL_MINT])
-                        price = parsed.get(SOL_MINT, 0.0)
-                        if 5 < price < 10000:
-                            return price
+                async with httpx.AsyncClient(timeout=3.0, headers=_jupiter_price_headers()) as client:
+                    bases: list[str] = []
+                    for b in (JUPITER_PRICE_V3_LITE, JUPITER_PRICE_V3_FALLBACK):
+                        if b and b.rstrip("/") not in {x.rstrip("/") for x in bases}:
+                            bases.append(b)
+                    for base in bases:
+                        try:
+                            r = await client.get(f"{base}?ids={SOL_MINT}")
+                            if r.status_code == 200:
+                                parsed = _jupiter_parse_prices_json(r.json(), [SOL_MINT])
+                                price = parsed.get(SOL_MINT, 0.0)
+                                if 5 < price < 10000:
+                                    return price
+                        except Exception:
+                            continue
             except Exception:
                 pass
             return None
@@ -3262,13 +3277,20 @@ async def _get_sol_usd_price() -> float:
             _fetch_dexscreener(),
             return_exceptions=True
         )
-        
-        # Retourner le premier prix valide trouvé
-        for price in results:
-            if isinstance(price, float) and price is not None:
+
+        for item in results:
+            if isinstance(item, BaseException):
+                continue
+            if item is None:
+                continue
+            try:
+                price = float(item)
+            except (TypeError, ValueError):
+                continue
+            if 5 < price < 10000:
                 _sol_price_cache["price"] = price
                 _sol_price_cache["timestamp"] = time.time()
-                _sol_price_cache["last_valid_price"] = price  # Mise à jour du fallback
+                _sol_price_cache["last_valid_price"] = price
                 return price
         
         # Aucune source n'a répondu → retourner le dernier prix connu (ultra rapide fallback)
@@ -3379,30 +3401,46 @@ async def _get_prices_batch(addresses: List[str]) -> dict:
         if now - cached["ts"] < _price_batch_cache_ttl:
             return dict(cached["prices"])
 
-    # 1) Jupiter lite-api Price v3 (public, ne pas utiliser api.jup.ag → 401 sans clé)
-    chunk_size = 100
+    # 1) Jupiter Price v3 : lite-api puis secours api.jup.ag (même schéma JSON ; timeouts plus larges pour l’hébergement)
+    chunk_size = 50
     jupiter_net_logged = False
-    for i in range(0, len(addresses), chunk_size):
-        chunk = addresses[i : i + chunk_size]
-        ids_param = ",".join(chunk)
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(f"{JUPITER_LITE_PRICE_V3}?ids={ids_param}")
-                if r.status_code == 200:
-                    for addr, p in _jupiter_parse_prices_json(r.json(), chunk).items():
-                        if p > 0:
-                            result[addr] = p
-        except Exception as e:
-            if _is_likely_network_dns_error(e):
-                if not jupiter_net_logged:
-                    print(
-                        "[!] Jupiter prix : pas d’accès réseau ou DNS (getaddrinfo). "
-                        "Vérifiez Internet, le DNS, le pare-feu ou le VPN. "
-                        f"Détail : {e}"
-                    )
-                    jupiter_net_logged = True
-                break
-            print(f"Jupiter batch prix: {e}")
+    jupiter_bases: List[str] = []
+    for b in (JUPITER_PRICE_V3_LITE, JUPITER_PRICE_V3_FALLBACK):
+        if b and b.rstrip("/") not in {x.rstrip("/") for x in jupiter_bases}:
+            jupiter_bases.append(b)
+
+    async def _jupiter_fetch_into(addrs: List[str], base_url: str) -> None:
+        nonlocal jupiter_net_logged
+        if not base_url or not addrs:
+            return
+        for i in range(0, len(addrs), chunk_size):
+            chunk = addrs[i : i + chunk_size]
+            ids_param = ",".join(chunk)
+            try:
+                async with httpx.AsyncClient(timeout=20.0, headers=_jupiter_price_headers()) as client:
+                    r = await client.get(f"{base_url}?ids={ids_param}")
+                    if r.status_code == 200:
+                        for addr, p in _jupiter_parse_prices_json(r.json(), chunk).items():
+                            if p > 0:
+                                result[addr] = p
+            except Exception as e:
+                if _is_likely_network_dns_error(e):
+                    if not jupiter_net_logged:
+                        print(
+                            "[!] Jupiter prix : pas d’accès réseau ou DNS (getaddrinfo). "
+                            "Vérifiez Internet, le DNS, le pare-feu ou le VPN. "
+                            f"Détail : {e}"
+                        )
+                        jupiter_net_logged = True
+                    return
+                print(f"Jupiter batch prix ({base_url}): {e}")
+
+    if jupiter_bases:
+        await _jupiter_fetch_into(addresses, jupiter_bases[0])
+        if len(jupiter_bases) > 1:
+            missing_j = [a for a in addresses if a not in result or result.get(a, 0) <= 0]
+            if missing_j:
+                await _jupiter_fetch_into(missing_j, jupiter_bases[1])
 
     # 2) Birdeye multi_price — manquants uniquement (si clé)
     missing = [a for a in addresses if a not in result or result.get(a, 0) <= 0]
@@ -3466,14 +3504,14 @@ async def _get_prices_batch(addresses: List[str]) -> dict:
     return result
 
 
-# Prix en temps réel — DexScreener puis Jupiter lite-api v3 (api.jup.ag = 401 sans clé)
+# Prix en temps réel — DexScreener puis Jupiter (lite-api puis secours api.jup.ag)
 @app.get("/api/price/{token_address}")
 async def get_token_price(token_address: str):
     """
-    Ordre : DexScreener → Jupiter lite price/v3 → Birdeye.
+    Ordre : DexScreener → Jupiter price/v3 (lite puis fallback) → Birdeye.
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=_jupiter_price_headers()) as client:
             # 1) DexScreener
             try:
                 resp = await client.get(
@@ -3491,22 +3529,27 @@ async def get_token_price(token_address: str):
                         }
             except Exception as e:
                 print(f"DexScreener erreur : {e}")
-            
-            # 2) Jupiter Price (lite-api v3 — api.jup.ag renvoie 401 sans clé)
-            try:
-                resp2 = await client.get(
-                    f"{JUPITER_LITE_PRICE_V3}?ids={token_address}",
-                    timeout=5.0
-                )
-                if resp2.status_code == 200:
-                    parsed = _jupiter_parse_prices_json(resp2.json(), [token_address])
-                    price = parsed.get(token_address, 0.0)
-                    if price > 0:
-                        return {"address": token_address, "price": price,
+
+            # 2) Jupiter Price v3
+            jup_bases: List[str] = []
+            for b in (JUPITER_PRICE_V3_LITE, JUPITER_PRICE_V3_FALLBACK):
+                if b and b.rstrip("/") not in {x.rstrip("/") for x in jup_bases}:
+                    jup_bases.append(b)
+            for jb in jup_bases:
+                try:
+                    resp2 = await client.get(f"{jb}?ids={token_address}", timeout=8.0)
+                    if resp2.status_code == 200:
+                        parsed = _jupiter_parse_prices_json(resp2.json(), [token_address])
+                        price = parsed.get(token_address, 0.0)
+                        if price > 0:
+                            return {
+                                "address": token_address,
+                                "price": price,
                                 "timestamp": datetime.now().isoformat(),
-                                "source": "jupiter_lite_v3"}
-            except Exception as e:
-                print(f"Jupiter erreur : {e}")
+                                "source": "jupiter_v3",
+                            }
+                except Exception as e:
+                    print(f"Jupiter erreur ({jb}): {e}")
             
             # 3) Birdeye API (couverture quasi-complète Solana)
             if BIRDEYE_API_KEY:

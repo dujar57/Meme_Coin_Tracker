@@ -78,6 +78,9 @@ def adapt_sql_postgres(sql: str) -> str:
     s = s.replace("IFNULL(", "COALESCE(")
     s = s.replace("MAX(0.0,", "GREATEST(0.0,")
 
+    # PostgreSQL exige un espace : ON CONFLICT (cols) ; SQLite accepte aussi cette forme
+    s = re.sub(r"ON CONFLICT\(", "ON CONFLICT (", s)
+
     # rowid = SQLite ; nos requêtes l’utilisent sur des tables avec clé id (sérial)
     s = re.sub(r"\bORDER\s+BY\s+rowid\s+DESC\b", "ORDER BY id DESC", s, flags=re.I)
 

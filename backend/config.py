@@ -101,6 +101,11 @@ BIRDEYE_API_KEY = os.getenv(ENV_NAME_BIRDEYE_API_KEY, "").strip()
 API_KEY = os.getenv(ENV_NAME_SERVICE_API_KEY, "").strip()
 REQUIRE_API_KEY = bool(API_KEY) and IS_PROD
 
+# Jupiter Price v3 (USD) — sur certains hébergeurs lite-api peut échouer ; fallback documenté api.jup.ag
+JUPITER_PRICE_V3_LITE = os.getenv("JUPITER_PRICE_V3_LITE", "https://lite-api.jup.ag/price/v3").strip()
+JUPITER_PRICE_V3_FALLBACK = os.getenv("JUPITER_PRICE_V3_FALLBACK", "https://api.jup.ag/price/v3").strip()
+JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", "").strip()
+
 # Trusted Host : TRUSTED_HOSTS explicite, ou RENDER_EXTERNAL_HOSTNAME + localhost
 _TRUST_USER = _parse_csv("TRUSTED_HOSTS")
 _RENDER_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
