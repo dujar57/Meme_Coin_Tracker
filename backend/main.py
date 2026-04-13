@@ -33,7 +33,15 @@ from config import (
     IS_PROD,
     REQUIRE_API_KEY,
     TRUSTED_HOSTS,
+    USE_POSTGRES,
     USE_TRUSTED_HOST,
+)
+from db_backend import (
+    get_pg_connection,
+    init_postgres_schema,
+    is_unique_constraint_error,
+    postgres_table_columns,
+    wipe_all_postgres_data,
 )
 import auth_service
 
@@ -171,12 +179,12 @@ def _wallet_hifo_fingerprint(cursor, wallet: str) -> str:
     cursor.execute(
         """
         SELECT
-          IFNULL((SELECT COUNT(*) FROM purchases WHERE wallet_address = ?), 0),
-          IFNULL((SELECT COUNT(*) FROM sales s JOIN tokens t ON s.token_id = t.id WHERE t.wallet_address = ?), 0),
-          IFNULL((SELECT MAX(p.id) FROM purchases p WHERE p.wallet_address = ?), 0),
-          IFNULL((SELECT MAX(s.id) FROM sales s JOIN tokens t ON s.token_id = t.id WHERE t.wallet_address = ?), 0),
-          IFNULL((SELECT SUM(p.sol_spent) FROM purchases p WHERE p.wallet_address = ?), 0),
-          IFNULL((SELECT SUM(s.sol_received) FROM sales s JOIN tokens t ON s.token_id = t.id WHERE t.wallet_address = ?), 0)
+          COALESCE((SELECT COUNT(*) FROM purchases WHERE wallet_address = ?), 0),
+          COALESCE((SELECT COUNT(*) FROM sales s JOIN tokens t ON s.token_id = t.id WHERE t.wallet_address = ?), 0),
+          COALESCE((SELECT MAX(p.id) FROM purchases p WHERE p.wallet_address = ?), 0),
+          COALESCE((SELECT MAX(s.id) FROM sales s JOIN tokens t ON s.token_id = t.id WHERE t.wallet_address = ?), 0),
+          COALESCE((SELECT SUM(p.sol_spent) FROM purchases p WHERE p.wallet_address = ?), 0),
+          COALESCE((SELECT SUM(s.sol_received) FROM sales s JOIN tokens t ON s.token_id = t.id WHERE t.wallet_address = ?), 0)
         """,
         (wallet, wallet, wallet, wallet, wallet, wallet),
     )
@@ -905,6 +913,10 @@ if _sqlite_dir:
 
 @contextmanager
 def get_db():
+    if USE_POSTGRES:
+        with get_pg_connection() as conn:
+            yield conn
+        return
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -926,6 +938,11 @@ def wipe_all_database_data(conn: sqlite3.Connection) -> list[str]:
     Supprime toutes les lignes de chaque table utilisateur (schéma et index inchangés).
     Réinitialise les compteurs AUTOINCREMENT (sqlite_sequence).
     """
+    if USE_POSTGRES:
+        c = conn.cursor()
+        cleared = wipe_all_postgres_data(c)
+        conn.commit()
+        return cleared
     c = conn.cursor()
     c.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -1227,6 +1244,29 @@ WALLET_SOL_FLOW_AGG_VERSION = 2
 
 
 def _ensure_wallet_sol_flow_schema(conn) -> None:
+    if USE_POSTGRES:
+        c = conn.cursor()
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wallet_sol_flow (
+                wallet_address TEXT PRIMARY KEY,
+                sol_recu DOUBLE PRECISION NOT NULL DEFAULT 0,
+                sol_envoye DOUBLE PRECISION NOT NULL DEFAULT 0,
+                pages_scanned INTEGER NOT NULL DEFAULT 0,
+                updated_ts DOUBLE PRECISION NOT NULL DEFAULT 0,
+                flow_agg_version INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        cols = postgres_table_columns(c, "wallet_sol_flow")
+        if cols and "flow_agg_version" not in cols:
+            try:
+                c.execute(
+                    "ALTER TABLE wallet_sol_flow ADD COLUMN flow_agg_version INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS wallet_sol_flow (
@@ -1296,7 +1336,7 @@ _SNAPSHOT_MIN_ABS_DELTA_USD = 1.0
 def _token_non_wsol_clause(alias: str = "tokens") -> str:
     """Même périmètre que update_all_prices : pas de ligne adresse vide, pas de wSOL."""
     return (
-        f"{alias}.address != '' AND IFNULL({alias}.address, '') != :wsol_mint"
+        f"{alias}.address != '' AND COALESCE({alias}.address, '') != :wsol_mint"
     )
 
 
@@ -1610,198 +1650,206 @@ def _ensure_wallet_pnl_snapshots(conn, wallet: str, sol_usd: float) -> None:
 
 @app.on_event("startup")
 async def startup_event():
-    init_db()
-    # Migrations douces : colonnes ajoutées après la création initiale
-    with get_db() as conn:
-        c = conn.cursor()
-        # sales : colonnes historiques
-        c.execute("PRAGMA table_info(sales)")
-        sale_cols = [r["name"] for r in c.fetchall()]
-        for col, typedef in [
-            ("transaction_signature", "TEXT"),
-            ("sale_timestamp", "INTEGER"),
-            ("sale_slot", "INTEGER DEFAULT 0"),
-            ("sol_received", "REAL DEFAULT 0"),
-            ("sol_usd_at_sale", "REAL DEFAULT NULL"),
-            ("hifo_buy_cost_usd", "REAL DEFAULT NULL"),
-            ("hifo_pnl_usd", "REAL DEFAULT NULL"),
-        ]:
-            if col not in sale_cols:
-                c.execute(f"ALTER TABLE sales ADD COLUMN {col} {typedef}")
-        # tokens : colonnes ajoutées après la création initiale
-        c.execute("PRAGMA table_info(tokens)")
-        token_cols = [r["name"] for r in c.fetchall()]
-        if "sol_usd_at_buy" not in token_cols:
-            c.execute("ALTER TABLE tokens ADD COLUMN sol_usd_at_buy REAL DEFAULT NULL")
-        if "wallet_address" not in token_cols:
-            c.execute("ALTER TABLE tokens ADD COLUMN wallet_address TEXT DEFAULT NULL")
-        if "price_is_stale" not in token_cols:
-            c.execute("ALTER TABLE tokens ADD COLUMN price_is_stale BOOLEAN DEFAULT 0")
-        if "price_warning" not in token_cols:
-            c.execute("ALTER TABLE tokens ADD COLUMN price_warning TEXT DEFAULT NULL")
-        # Migration : attribuer le wallet de settings aux tokens qui n'en ont pas
-        try:
-            c.execute("SELECT value FROM settings WHERE key = 'wallet_address'")
-            settings_row = c.fetchone()
-            if settings_row and settings_row["value"]:
-                c.execute("UPDATE tokens SET wallet_address = ? WHERE wallet_address IS NULL OR wallet_address = ''",
-                          (settings_row["value"],))
-        except Exception:
-            pass
-        _migrate_tokens_wallet_scoped_unique(conn)
-        # Table de déduplication des imports
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS imported_tx (
-                signature   TEXT PRIMARY KEY,
-                tx_type     TEXT NOT NULL,
-                imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS wallet_hifo_cache (
-                wallet_address TEXT PRIMARY KEY,
-                realized_gain REAL NOT NULL DEFAULT 0,
-                realized_loss REAL NOT NULL DEFAULT 0,
-                fingerprint TEXT NOT NULL DEFAULT '',
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS wallet_pnl_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                wallet_address TEXT NOT NULL,
-                recorded_at TIMESTAMP NOT NULL,
-                net_pnl_usd REAL NOT NULL,
-                total_invested_usd REAL DEFAULT 0,
-                current_value_usd REAL DEFAULT 0,
-                withdrawn_usd REAL DEFAULT 0
-            )
-        """)
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_wallet_pnl_wallet_time ON wallet_pnl_snapshots(wallet_address, recorded_at)"
-        )
-        # Table des achats individuels (migration douce)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS purchases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token_id INTEGER NOT NULL,
-                purchase_date TEXT NOT NULL,
-                purchase_timestamp INTEGER,
-                tokens_bought REAL NOT NULL,
-                purchase_price REAL NOT NULL,
-                sol_spent REAL NOT NULL,
-                transaction_signature TEXT NOT NULL,
-                sol_usd_at_buy REAL DEFAULT NULL,
-                wallet_address TEXT DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (token_id) REFERENCES tokens (id),
-                UNIQUE(token_id, transaction_signature)
-            )
-        """)
-        # Migration douce : ajouter wallet_address aux purchases existantes
-        c.execute("PRAGMA table_info(purchases)")
-        purchase_cols = [r["name"] for r in c.fetchall()]
-        if "wallet_address" not in purchase_cols:
-            c.execute("ALTER TABLE purchases ADD COLUMN wallet_address TEXT DEFAULT NULL")
+    if USE_POSTGRES:
+        with get_pg_connection() as conn:
+            c = conn.cursor()
+            init_postgres_schema(c)
+            auth_service.ensure_auth_tables(c)
+            conn.commit()
+        print("[OK] Base PostgreSQL initialisee (schema + index)")
+    else:
+        init_db()
+        # Migrations douces : colonnes ajoutées après la création initiale
+        with get_db() as conn:
+            c = conn.cursor()
+            # sales : colonnes historiques
+            c.execute("PRAGMA table_info(sales)")
+            sale_cols = [r["name"] for r in c.fetchall()]
+            for col, typedef in [
+                ("transaction_signature", "TEXT"),
+                ("sale_timestamp", "INTEGER"),
+                ("sale_slot", "INTEGER DEFAULT 0"),
+                ("sol_received", "REAL DEFAULT 0"),
+                ("sol_usd_at_sale", "REAL DEFAULT NULL"),
+                ("hifo_buy_cost_usd", "REAL DEFAULT NULL"),
+                ("hifo_pnl_usd", "REAL DEFAULT NULL"),
+            ]:
+                if col not in sale_cols:
+                    c.execute(f"ALTER TABLE sales ADD COLUMN {col} {typedef}")
+            # tokens : colonnes ajoutées après la création initiale
+            c.execute("PRAGMA table_info(tokens)")
+            token_cols = [r["name"] for r in c.fetchall()]
+            if "sol_usd_at_buy" not in token_cols:
+                c.execute("ALTER TABLE tokens ADD COLUMN sol_usd_at_buy REAL DEFAULT NULL")
+            if "wallet_address" not in token_cols:
+                c.execute("ALTER TABLE tokens ADD COLUMN wallet_address TEXT DEFAULT NULL")
+            if "price_is_stale" not in token_cols:
+                c.execute("ALTER TABLE tokens ADD COLUMN price_is_stale BOOLEAN DEFAULT 0")
+            if "price_warning" not in token_cols:
+                c.execute("ALTER TABLE tokens ADD COLUMN price_warning TEXT DEFAULT NULL")
+            # Migration : attribuer le wallet de settings aux tokens qui n'en ont pas
+            try:
+                c.execute("SELECT value FROM settings WHERE key = 'wallet_address'")
+                settings_row = c.fetchone()
+                if settings_row and settings_row["value"]:
+                    c.execute("UPDATE tokens SET wallet_address = ? WHERE wallet_address IS NULL OR wallet_address = ''",
+                              (settings_row["value"],))
+            except Exception:
+                pass
+            _migrate_tokens_wallet_scoped_unique(conn)
+            # Table de déduplication des imports
             c.execute("""
-                UPDATE purchases SET wallet_address = (
-                    SELECT t.wallet_address FROM tokens t WHERE t.id = purchases.token_id
-                ) WHERE wallet_address IS NULL
+                CREATE TABLE IF NOT EXISTS imported_tx (
+                    signature   TEXT PRIMARY KEY,
+                    tx_type     TEXT NOT NULL,
+                    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             """)
-        if "purchase_slot" not in purchase_cols:
-            c.execute("ALTER TABLE purchases ADD COLUMN purchase_slot INTEGER DEFAULT 0")
-
-        _migrate_purchases_token_signature_unique(conn)
-        
-        # === CRÉER LES INDEXES POUR MAXIMISER LA PERFORMANCE ===
-        indexes = [
-            # Indexes simples
-            ("idx_tokens_wallet", "tokens", "(wallet_address)"),
-            ("idx_tokens_address", "tokens", "(address)"),
-            ("idx_sales_token", "sales", "(token_id)"),
-            ("idx_sales_signature", "sales", "(transaction_signature)"),
-            ("idx_sales_date", "sales", "(sale_date)"),
-            ("idx_purchases_token", "purchases", "(token_id)"),
-            ("idx_purchases_signature", "purchases", "(transaction_signature)"),
-            ("idx_purchases_wallet", "purchases", "(wallet_address)"),
-            ("idx_purchases_timestamp", "purchases", "(purchase_timestamp)"),
-            ("idx_imported_tx_sig", "imported_tx", "(signature)"),
-            ("idx_price_history_token", "price_history", "(token_id)"),
-            ("idx_price_history_timestamp", "price_history", "(timestamp)"),
-            # Composites : requêtes dashboard / initial-load / import (wallet + tri / jointures)
-            ("idx_sales_token_date", "sales", "(token_id, sale_date)"),
-            ("idx_purchases_token_timestamp", "purchases", "(token_id, purchase_timestamp)"),
-            ("idx_tokens_wallet_created", "tokens", "(wallet_address, created_at)"),
-            ("idx_tokens_wallet_mint", "tokens", "(wallet_address, address)"),
-            ("idx_purchases_wallet_ts", "purchases", "(wallet_address, purchase_timestamp)"),
-            ("idx_sales_token_ts", "sales", "(token_id, sale_timestamp)"),
-            ("idx_price_history_token_ts", "price_history", "(token_id, timestamp)"),
-        ]
-        for idx_name, table_name, column_spec in indexes:
-            c.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} {column_spec}")
-
-        # Index partiels : sous-requêtes SUM / EXISTS sur achats « réels » (moins de lignes à parcourir)
-        for partial_sql in (
-            "CREATE INDEX IF NOT EXISTS idx_purchases_token_active ON purchases(token_id) WHERE tokens_bought > 0 AND sol_spent > 0",
-            "CREATE INDEX IF NOT EXISTS idx_purchases_wallet_active ON purchases(wallet_address, token_id) WHERE tokens_bought > 0 AND sol_spent > 0",
-        ):
-            c.execute(partial_sql)
-
-        # Statistiques pour l’optimiseur de requêtes (après création d’index)
-        try:
-            c.execute("ANALYZE tokens")
-            c.execute("ANALYZE purchases")
-            c.execute("ANALYZE sales")
-            c.execute("ANALYZE price_history")
-            c.execute("PRAGMA optimize")
-        except sqlite3.Error:
-            pass
-
-        # === Tables investisseur long terme ===
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS token_targets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token_id INTEGER NOT NULL,
-                wallet_address TEXT,
-                mcap_target TEXT,
-                tp_price REAL,
-                sl_price REAL,
-                alert_enabled INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (token_id) REFERENCES tokens (id)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_hifo_cache (
+                    wallet_address TEXT PRIMARY KEY,
+                    realized_gain REAL NOT NULL DEFAULT 0,
+                    realized_loss REAL NOT NULL DEFAULT 0,
+                    fingerprint TEXT NOT NULL DEFAULT '',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_pnl_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    wallet_address TEXT NOT NULL,
+                    recorded_at TIMESTAMP NOT NULL,
+                    net_pnl_usd REAL NOT NULL,
+                    total_invested_usd REAL DEFAULT 0,
+                    current_value_usd REAL DEFAULT 0,
+                    withdrawn_usd REAL DEFAULT 0
+                )
+            """)
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wallet_pnl_wallet_time ON wallet_pnl_snapshots(wallet_address, recorded_at)"
             )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS token_notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token_id INTEGER NOT NULL,
-                note_date TEXT NOT NULL,
-                content TEXT,
-                event_type TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (token_id) REFERENCES tokens (id)
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS wallets (
-                address TEXT PRIMARY KEY,
-                label TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS wallet_reference_capital (
-                wallet_address TEXT PRIMARY KEY,
-                amount_usd REAL NOT NULL DEFAULT 0,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        auth_service.ensure_auth_tables(c)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_token_targets_token ON token_targets(token_id)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_token_notes_token ON token_notes(token_id)")
-
-        conn.commit()
-    print("[OK] Base de donnees initialisee + index / ANALYZE / PRAGMA perf")
+            # Table des achats individuels (migration douce)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS purchases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_id INTEGER NOT NULL,
+                    purchase_date TEXT NOT NULL,
+                    purchase_timestamp INTEGER,
+                    tokens_bought REAL NOT NULL,
+                    purchase_price REAL NOT NULL,
+                    sol_spent REAL NOT NULL,
+                    transaction_signature TEXT NOT NULL,
+                    sol_usd_at_buy REAL DEFAULT NULL,
+                    wallet_address TEXT DEFAULT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (token_id) REFERENCES tokens (id),
+                    UNIQUE(token_id, transaction_signature)
+                )
+            """)
+            # Migration douce : ajouter wallet_address aux purchases existantes
+            c.execute("PRAGMA table_info(purchases)")
+            purchase_cols = [r["name"] for r in c.fetchall()]
+            if "wallet_address" not in purchase_cols:
+                c.execute("ALTER TABLE purchases ADD COLUMN wallet_address TEXT DEFAULT NULL")
+                c.execute("""
+                    UPDATE purchases SET wallet_address = (
+                        SELECT t.wallet_address FROM tokens t WHERE t.id = purchases.token_id
+                    ) WHERE wallet_address IS NULL
+                """)
+            if "purchase_slot" not in purchase_cols:
+                c.execute("ALTER TABLE purchases ADD COLUMN purchase_slot INTEGER DEFAULT 0")
+    
+            _migrate_purchases_token_signature_unique(conn)
+            
+            # === CRÉER LES INDEXES POUR MAXIMISER LA PERFORMANCE ===
+            indexes = [
+                # Indexes simples
+                ("idx_tokens_wallet", "tokens", "(wallet_address)"),
+                ("idx_tokens_address", "tokens", "(address)"),
+                ("idx_sales_token", "sales", "(token_id)"),
+                ("idx_sales_signature", "sales", "(transaction_signature)"),
+                ("idx_sales_date", "sales", "(sale_date)"),
+                ("idx_purchases_token", "purchases", "(token_id)"),
+                ("idx_purchases_signature", "purchases", "(transaction_signature)"),
+                ("idx_purchases_wallet", "purchases", "(wallet_address)"),
+                ("idx_purchases_timestamp", "purchases", "(purchase_timestamp)"),
+                ("idx_imported_tx_sig", "imported_tx", "(signature)"),
+                ("idx_price_history_token", "price_history", "(token_id)"),
+                ("idx_price_history_timestamp", "price_history", "(timestamp)"),
+                # Composites : requêtes dashboard / initial-load / import (wallet + tri / jointures)
+                ("idx_sales_token_date", "sales", "(token_id, sale_date)"),
+                ("idx_purchases_token_timestamp", "purchases", "(token_id, purchase_timestamp)"),
+                ("idx_tokens_wallet_created", "tokens", "(wallet_address, created_at)"),
+                ("idx_tokens_wallet_mint", "tokens", "(wallet_address, address)"),
+                ("idx_purchases_wallet_ts", "purchases", "(wallet_address, purchase_timestamp)"),
+                ("idx_sales_token_ts", "sales", "(token_id, sale_timestamp)"),
+                ("idx_price_history_token_ts", "price_history", "(token_id, timestamp)"),
+            ]
+            for idx_name, table_name, column_spec in indexes:
+                c.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} {column_spec}")
+    
+            # Index partiels : sous-requêtes SUM / EXISTS sur achats « réels » (moins de lignes à parcourir)
+            for partial_sql in (
+                "CREATE INDEX IF NOT EXISTS idx_purchases_token_active ON purchases(token_id) WHERE tokens_bought > 0 AND sol_spent > 0",
+                "CREATE INDEX IF NOT EXISTS idx_purchases_wallet_active ON purchases(wallet_address, token_id) WHERE tokens_bought > 0 AND sol_spent > 0",
+            ):
+                c.execute(partial_sql)
+    
+            # Statistiques pour l’optimiseur de requêtes (après création d’index)
+            try:
+                c.execute("ANALYZE tokens")
+                c.execute("ANALYZE purchases")
+                c.execute("ANALYZE sales")
+                c.execute("ANALYZE price_history")
+                c.execute("PRAGMA optimize")
+            except sqlite3.Error:
+                pass
+    
+            # === Tables investisseur long terme ===
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS token_targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_id INTEGER NOT NULL,
+                    wallet_address TEXT,
+                    mcap_target TEXT,
+                    tp_price REAL,
+                    sl_price REAL,
+                    alert_enabled INTEGER DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (token_id) REFERENCES tokens (id)
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS token_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_id INTEGER NOT NULL,
+                    note_date TEXT NOT NULL,
+                    content TEXT,
+                    event_type TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (token_id) REFERENCES tokens (id)
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS wallets (
+                    address TEXT PRIMARY KEY,
+                    label TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_reference_capital (
+                    wallet_address TEXT PRIMARY KEY,
+                    amount_usd REAL NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            auth_service.ensure_auth_tables(c)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_token_targets_token ON token_targets(token_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_token_notes_token ON token_notes(token_id)")
+    
+            conn.commit()
+        print("[OK] Base de donnees initialisee + index / ANALYZE / PRAGMA perf")
     
     # Pré-charger le prix SOL (BLOQUANT - attendre avant de démarrer le serveur)
     try:
@@ -2212,8 +2260,10 @@ async def create_token(token: Token):
             # Invalider le cache du dashboard
             _invalidate_dashboard_cache()
             return token
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Cette adresse existe déjà")
+        except Exception as e:
+            if is_unique_constraint_error(e):
+                raise HTTPException(status_code=400, detail="Cette adresse existe déjà")
+            raise
 
 @app.put("/api/tokens/{token_id}", response_model=Token)
 async def update_token(token_id: int, token: Token):
@@ -2753,7 +2803,7 @@ async def wipe_all_database_endpoint(
     with get_db() as conn:
         cleared = wipe_all_database_data(conn)
 
-    if vacuum:
+    if vacuum and not USE_POSTGRES:
         vconn = sqlite3.connect(DB_PATH, timeout=120)
         try:
             vconn.execute("VACUUM")
@@ -3071,6 +3121,32 @@ async def _get_sol_usd_at_date(date_str: str) -> float:
         except Exception:
             pass
 
+        # 2b) Binance — fenêtre élargie (plusieurs bougies 1d) si le créneau exact n’a rien renvoyé
+        try:
+            start_wide = start_ms - 4 * 86400000
+            resp = await client.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": "SOLUSDT",
+                    "interval": "1d",
+                    "startTime": start_wide,
+                    "limit": 10,
+                },
+            )
+            if resp.status_code == 200:
+                for k in resp.json() or []:
+                    if not k:
+                        continue
+                    ot = int(k[0])
+                    day_str = datetime.fromtimestamp(ot / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                    if day_str == date_str:
+                        price = float(k[4])
+                        if price > 0:
+                            _sol_history_cache[date_str] = price
+                            return price
+        except Exception:
+            pass
+
         # 3) CoinGecko — fallback (bloque parfois >1 an sur plan gratuit)
         try:
             cg_date = d.strftime("%d-%m-%Y")
@@ -3083,6 +3159,25 @@ async def _get_sol_usd_at_date(date_str: str) -> float:
                 if price > 0:
                     _sol_history_cache[date_str] = price
                     return price
+        except Exception:
+            pass
+
+        # 3b) CoinGecko — market_chart/range sur 24h UTC (souvent OK quand /history bloque)
+        try:
+            d_utc = d.replace(tzinfo=timezone.utc)
+            frm = int(d_utc.timestamp())
+            to = frm + 86400
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/coins/solana/market_chart/range",
+                params={"vs_currency": "usd", "from": frm, "to": to},
+            )
+            if resp.status_code == 200:
+                prices = resp.json().get("prices") or []
+                if prices:
+                    avg = sum(float(p[1]) for p in prices) / len(prices)
+                    if avg > 0:
+                        _sol_history_cache[date_str] = avg
+                        return avg
         except Exception:
             pass
 
@@ -3479,7 +3574,7 @@ async def update_all_prices(
     sel = (
         "SELECT id, address, name, wallet_address, current_tokens, invested_amount, sol_usd_at_buy, "
         "COALESCE(current_price, 0) AS current_price FROM tokens WHERE address != '' "
-        "AND IFNULL(address, '') != ?"
+        "AND COALESCE(address, '') != ?"
     )
     with get_db() as conn:
         cursor = conn.cursor()
@@ -3655,7 +3750,7 @@ async def update_prices_for_tokens(body: UpdatePricesForTokensBody = Body(...), 
         placeholders = ",".join("?" * len(body.addresses))
         cursor.execute(
             f"SELECT id, address, current_tokens, invested_amount, sol_usd_at_buy, wallet_address FROM tokens "
-            f"WHERE address IN ({placeholders}) AND address != '' AND IFNULL(address, '') != ?",
+            f"WHERE address IN ({placeholders}) AND address != '' AND COALESCE(address, '') != ?",
             [*body.addresses, SOL_MINT],
         )
         tokens = [dict(r) for r in cursor.fetchall()]
@@ -4668,7 +4763,7 @@ async def helius_import_swaps(
             "SELECT address FROM tokens WHERE wallet_address = ? AND address != ''",
             (wallet_address,),
         )
-        known_mints = {r[0] for r in cur.fetchall()}
+        known_mints = {r["address"] for r in cur.fetchall()}
     mints_to_resolve = [m for m in all_mints if m not in known_mints]
     token_names = await _resolve_token_names(mints_to_resolve, key)
 
@@ -4680,18 +4775,19 @@ async def helius_import_swaps(
     with get_db() as conn:
         db_cur = conn.cursor()
 
-        # S'assurer que la colonne transaction_signature existe (migration douce)
-        db_cur.execute("PRAGMA table_info(sales)")
-        cols = [r["name"] for r in db_cur.fetchall()]
-        if "transaction_signature" not in cols:
-            db_cur.execute("ALTER TABLE sales ADD COLUMN transaction_signature TEXT")
-        if "sale_timestamp" not in cols:
-            db_cur.execute("ALTER TABLE sales ADD COLUMN sale_timestamp INTEGER")
-        if "sale_slot" not in cols:
-            db_cur.execute("ALTER TABLE sales ADD COLUMN sale_slot INTEGER DEFAULT 0")
-        if "sol_received" not in cols:
-            db_cur.execute("ALTER TABLE sales ADD COLUMN sol_received REAL DEFAULT 0")
-        conn.commit()
+        if not USE_POSTGRES:
+            # Migrations douces SQLite uniquement (schéma Postgres déjà complet au démarrage)
+            db_cur.execute("PRAGMA table_info(sales)")
+            cols = [r["name"] for r in db_cur.fetchall()]
+            if "transaction_signature" not in cols:
+                db_cur.execute("ALTER TABLE sales ADD COLUMN transaction_signature TEXT")
+            if "sale_timestamp" not in cols:
+                db_cur.execute("ALTER TABLE sales ADD COLUMN sale_timestamp INTEGER")
+            if "sale_slot" not in cols:
+                db_cur.execute("ALTER TABLE sales ADD COLUMN sale_slot INTEGER DEFAULT 0")
+            if "sol_received" not in cols:
+                db_cur.execute("ALTER TABLE sales ADD COLUMN sol_received REAL DEFAULT 0")
+            conn.commit()
 
         # S'assurer que la table de suivi des signatures existe
         db_cur.execute("""
@@ -4701,13 +4797,13 @@ async def helius_import_swaps(
                 imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Migration douce : ajouter sol_usd_at_sale si absente
-        db_cur.execute("PRAGMA table_info(sales)")
-        sale_cols = [r["name"] for r in db_cur.fetchall()]
-        if "sol_usd_at_sale" not in sale_cols:
-            db_cur.execute("ALTER TABLE sales ADD COLUMN sol_usd_at_sale REAL DEFAULT NULL")
-        if "sale_slot" not in sale_cols:
-            db_cur.execute("ALTER TABLE sales ADD COLUMN sale_slot INTEGER DEFAULT 0")
+        if not USE_POSTGRES:
+            db_cur.execute("PRAGMA table_info(sales)")
+            sale_cols = [r["name"] for r in db_cur.fetchall()]
+            if "sol_usd_at_sale" not in sale_cols:
+                db_cur.execute("ALTER TABLE sales ADD COLUMN sol_usd_at_sale REAL DEFAULT NULL")
+            if "sale_slot" not in sale_cols:
+                db_cur.execute("ALTER TABLE sales ADD COLUMN sale_slot INTEGER DEFAULT 0")
         conn.commit()
 
         # Pré-charger tous les prix SOL historiques en parallèle (évite 50+ appels séquentiels)
@@ -4729,8 +4825,20 @@ async def helius_import_swaps(
                 return (d, p)
 
             pairs = await asyncio.gather(*[_fetch_sol_day(d) for d in dates_list])
+            today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             for d, p in pairs:
-                _date_sol_cache[d] = p if p else sol_usd
+                if p and p > 0:
+                    _date_sol_cache[d] = p
+                elif d == today_utc and sol_usd > 0:
+                    _date_sol_cache[d] = sol_usd
+                else:
+                    # Dernière ressource : spot (peut fausser fortement le $ d’achat sur les txs passées)
+                    _date_sol_cache[d] = sol_usd if sol_usd > 0 else 150.0
+                    if d != today_utc:
+                        print(
+                            f"[!] Import Helius: cours SOL/USD introuvable pour {d} — "
+                            f"spot actuel utilisé : risque d’erreur sur le prix d’achat en $"
+                        )
 
         for tx in swaps_fetched:
             try:
@@ -4874,6 +4982,22 @@ async def helius_import_swaps(
                     cost_targets_recv = non_stable_recv if non_stable_recv else valid_received
                     n_toks = len(cost_targets_recv) or 1
 
+                    # Stablecoins envoyés par le wallet (swap USDC/USDT → meme) : coût en USD quasi exact
+                    stable_sent_usd = 0.0
+                    for t in tokens_sent:
+                        m = (t.get("mint") or "").strip()
+                        if m in _SWAP_INTERMEDIATE_STABLE_MINTS:
+                            stable_sent_usd += float(t.get("tokenAmount", 0) or 0)
+                    sol_usd_leg = sol_spent * sol_at_tx if sol_at_tx > 0 else 0.0
+                    use_stable_quote = (
+                        stable_sent_usd >= 1.0
+                        and sol_at_tx > 0
+                        and stable_sent_usd >= 0.4 * max(sol_usd_leg, 1e-6)
+                    )
+                    base_sol_for_split = (
+                        (stable_sent_usd / sol_at_tx) if use_stable_quote else sol_spent
+                    )
+
                     for tok in tokens_received:
                         mint         = tok.get("mint", "")
                         token_amount = float(tok.get("tokenAmount", 0) or 0)
@@ -4882,7 +5006,7 @@ async def helius_import_swaps(
                         if mint in _SWAP_INTERMEDIATE_STABLE_MINTS and non_stable_recv:
                             continue
 
-                        tok_sol_spent   = sol_spent / n_toks
+                        tok_sol_spent   = base_sol_for_split / n_toks
                         price_per_token = tok_sol_spent / token_amount if token_amount else 0
 
                         db_cur.execute(
@@ -5131,12 +5255,12 @@ async def backfill_sol_prices():
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        # Migration douce
-        cursor.execute("PRAGMA table_info(sales)")
-        cols = [r["name"] for r in cursor.fetchall()]
-        if "sol_usd_at_sale" not in cols:
-            cursor.execute("ALTER TABLE sales ADD COLUMN sol_usd_at_sale REAL DEFAULT NULL")
-            conn.commit()
+        if not USE_POSTGRES:
+            cursor.execute("PRAGMA table_info(sales)")
+            cols = [r["name"] for r in cursor.fetchall()]
+            if "sol_usd_at_sale" not in cols:
+                cursor.execute("ALTER TABLE sales ADD COLUMN sol_usd_at_sale REAL DEFAULT NULL")
+                conn.commit()
 
         try:
             cursor.execute("DELETE FROM wallet_hifo_cache")
@@ -5396,7 +5520,9 @@ async def sync_balances_from_chain(wallet_address: str):
                     conn.commit()
                     added += 1
                     db_addresses.add(mint)
-                except sqlite3.IntegrityError:
+                except Exception as e:
+                    if not is_unique_constraint_error(e):
+                        raise
                     # Doublon (même mint + même wallet) ou schéma pas encore migré
                     conn.rollback()
 

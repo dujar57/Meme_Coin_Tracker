@@ -21,6 +21,11 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ENV = os.getenv("ENV", "development")
 IS_PROD = ENV.lower() == "production"
 
+# PostgreSQL (ex. Neon) : activer explicitement avec DATABASE_BACKEND=postgres + DATABASE_URL
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DATABASE_BACKEND = os.getenv("DATABASE_BACKEND", "sqlite").strip().lower()
+USE_POSTGRES = bool(DATABASE_URL) and DATABASE_BACKEND == "postgres"
+
 
 def _parse_csv(env_key: str) -> list[str]:
     raw = os.getenv(env_key, "").strip()

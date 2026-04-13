@@ -1958,8 +1958,8 @@ function renderDashboard(data, txs = []) {
             <div class="order-3 lg:order-none lg:col-span-3 lg:row-span-2 lg:col-start-1 lg:row-start-1 flex flex-col gap-6">
                 <div class="dashboard-flip">
                     <div class="${cardStd}">
-                        <div class="flex items-center justify-between">
-                            <div>
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="min-w-0 flex-1 pr-2">
                                 <p class="text-teal-500 text-sm font-medium">💎 Solde SOL</p>
                                 <p class="text-2xl sm:text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(solValue)}${_pctOfPatrimoineHtml(solValue, totalPatrimoine)}</p>
                                 <p class="text-xs mt-1 ${solBalanceStale ? 'text-amber-400' : 'text-teal-400'}">
@@ -1995,8 +1995,8 @@ function renderDashboard(data, txs = []) {
                 </div>
                 <div class="dashboard-flip">
                     <div class="${cardStd}">
-                        <div class="flex items-center justify-between">
-                            <div>
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="min-w-0 flex-1 pr-2">
                                 <p class="text-teal-500 text-sm font-medium">📊 Valeur Actuelle</p>
                                 <p class="text-2xl sm:text-3xl font-bold text-teal-800 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.current_amount ?? 0)}${_pctOfInvestedHtml(data.current_amount ?? 0, investedForRoi, 'text-lg font-semibold text-teal-600/90')}</p>
                             </div>
@@ -2031,7 +2031,7 @@ function renderDashboard(data, txs = []) {
                 <div class="dashboard-flip-inner">
                     <div class="${flipFront} hover:ring-2 hover:ring-teal-400/50 min-h-0 h-full border border-teal-200/30">
                         <div class="flex items-center justify-between w-full gap-3 px-2">
-                            <div>
+                            <div class="min-w-0 flex-1">
                                 <p class="text-teal-600 text-sm sm:text-base font-semibold">✨ Résultat net <span class="text-teal-500 font-normal text-xs sm:text-sm">(latent + figé)</span></p>
                                 <p class="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-extrabold ${netPos ? 'text-emerald-600' : 'text-rose-600'} mt-1 leading-tight flex flex-wrap items-baseline gap-x-2">
                                     ${_signedCurrency(data.net_total ?? 0)}${_pctOfInvestedHtml(data.net_total ?? 0, investedForRoi, `text-lg sm:text-2xl lg:text-3xl font-bold ml-1 ${netPos ? 'text-emerald-700' : 'text-rose-600'}`)}
@@ -2066,8 +2066,8 @@ function renderDashboard(data, txs = []) {
             <div class="order-4 lg:order-none lg:col-span-3 lg:col-start-10 lg:row-span-2 lg:row-start-1 flex flex-col gap-6">
                 <div class="dashboard-flip cursor-pointer" data-tx-filter="gains" title="P/L latent sur ce que vous détenez — clic : historique des ventes gagnantes">
                     <div class="${cardStd} hover:ring-2 hover:ring-emerald-400/50">
-                        <div class="flex items-center justify-between">
-                            <div>
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="min-w-0 flex-1 pr-2">
                                 <p class="text-teal-500 text-sm font-medium">📈 Gains Totaux</p>
                                 <p class="text-[10px] text-teal-600/80 -mt-0.5 mb-1">latent (détenus)</p>
                                 <p class="text-2xl sm:text-3xl font-bold text-emerald-600 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_gain ?? 0)}${_pctOfInvestedHtml(data.total_gain ?? 0, investedForRoi, 'text-lg font-bold text-emerald-700')}</p>
@@ -2080,8 +2080,8 @@ function renderDashboard(data, txs = []) {
                 </div>
                 <div class="dashboard-flip cursor-pointer" data-tx-filter="losses" title="P/L latent sur ce que vous détenez — clic : historique des ventes perdantes">
                     <div class="${cardStd} hover:ring-2 hover:ring-rose-400/50">
-                        <div class="flex items-center justify-between">
-                            <div>
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="min-w-0 flex-1 pr-2">
                                 <p class="text-teal-500 text-sm font-medium">📉 Pertes Totales</p>
                                 <p class="text-[10px] text-teal-600/80 -mt-0.5 mb-1">latent (détenus)</p>
                                 <p class="text-2xl sm:text-3xl font-bold text-rose-500 mt-2 flex flex-wrap items-baseline gap-x-1">${formatCurrency(data.total_loss ?? 0)}${_pctOfInvestedHtml(data.total_loss ?? 0, investedForRoi, 'text-lg font-bold text-rose-600', 'loss_mag')}</p>
@@ -2574,17 +2574,17 @@ async function renderTokens(allTokens, options = {}) {
                     : 'text-slate-600';
 
             return `
-                <div class="glass rounded-2xl shadow-xl p-4 sm:p-6 card-hover transition-all flex flex-col gap-4">
+                <div class="glass rounded-2xl shadow-xl p-4 sm:p-6 card-hover transition-all flex flex-col gap-4 min-w-0">
                     <!-- En-tête -->
-                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div class="min-w-0">
-                            <h3 class="text-lg sm:text-xl font-bold text-teal-800 break-words">${token.name}</h3>
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between min-w-0">
+                        <div class="min-w-0 flex-1">
+                            <h3 class="text-base sm:text-xl font-bold text-teal-800 break-words leading-snug">${token.name}</h3>
                             <p class="text-xs text-teal-400 font-mono mt-1 break-all">${addrShort}</p>
                             <a href="${dexHref}" target="_blank" rel="noopener" class="inline-flex items-center gap-1 mt-1.5 text-xs text-teal-500 hover:text-teal-700 font-medium" title="${walletAddress ? 'Voir sur DexScreener avec vos achats/ventes' : 'Voir sur DexScreener'}">
                                 <i class="fas fa-chart-line"></i> DexScreener
                             </a>
                         </div>
-                        <div class="flex flex-wrap gap-1.5 sm:gap-2 items-center sm:justify-end w-full sm:w-auto">
+                        <div class="flex flex-wrap gap-1.5 sm:gap-2 items-center justify-start sm:justify-end w-full sm:w-auto min-w-0">
                             <button type="button" onclick="showTokenTransactions(${token.id}, '${token.name.replace(/'/g, "\\'")}')"
                                 class="text-xs font-semibold px-2 py-1 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"
                                 title="Voir le tableau des transactions">
@@ -2601,14 +2601,14 @@ async function renderTokens(allTokens, options = {}) {
                     </div>
 
                     <!-- Prix -->
-                    <div class="grid grid-cols-2 gap-3">
-                        <div class="bg-teal-50 rounded-xl p-3 text-center">
+                    <div class="grid grid-cols-2 gap-2 sm:gap-3 min-w-0">
+                        <div class="bg-teal-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-teal-500 mb-1">Prix d'achat</p>
-                            <p class="font-bold text-teal-700">${formatPrice(buy)}</p>
+                            <p class="font-bold text-teal-700 text-sm sm:text-base break-all">${formatPrice(buy)}</p>
                         </div>
-                        <div class="bg-cyan-50 rounded-xl p-3 text-center">
+                        <div class="bg-cyan-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-cyan-500 mb-1">Prix actuel</p>
-                            <p class="font-bold text-cyan-700">${formatPrice(current)}</p>
+                            <p class="font-bold text-cyan-700 text-sm sm:text-base break-all">${formatPrice(current)}</p>
                             ${token.price_is_stale ? `<p class="text-xs text-orange-600 mt-1">⚠️ Ancien prix</p>` : ''}
                         </div>
                     </div>
@@ -2620,25 +2620,25 @@ async function renderTokens(allTokens, options = {}) {
                     ` : ''}
 
                     <!-- Tokens & Valeur -->
-                    <div class="grid grid-cols-2 gap-3">
-                        <div class="bg-sky-50 rounded-xl p-3 text-center">
+                    <div class="grid grid-cols-2 gap-2 sm:gap-3 min-w-0">
+                        <div class="bg-sky-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-sky-500 mb-1">Tokens</p>
-                            <p class="font-bold text-sky-700">${formatNumber(token.current_tokens || 0)}</p>
+                            <p class="font-bold text-sky-700 text-sm sm:text-base break-all">${formatNumber(token.current_tokens || 0)}</p>
                         </div>
-                        <div class="bg-emerald-50 rounded-xl p-3 text-center">
+                        <div class="bg-emerald-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-emerald-500 mb-1">Valeur actuelle</p>
-                            <p class="font-bold text-emerald-700">${formatCurrency(currentValue)}</p>
+                            <p class="font-bold text-emerald-700 text-sm sm:text-base break-all">${formatCurrency(currentValue)}</p>
                         </div>
                     </div>
 
                     <!-- Gain vs achat -->
-                    <div class="bg-${gainColor === 'green' ? 'emerald' : 'rose'}-50 rounded-xl p-3 flex items-center justify-between">
-                        <div>
+                    <div class="bg-${gainColor === 'green' ? 'emerald' : 'rose'}-50 rounded-xl p-2.5 sm:p-3 flex items-center justify-between gap-2 min-w-0">
+                        <div class="min-w-0 flex-1">
                             <p class="text-xs text-teal-500">📈 Gain vs achat</p>
-                            <p class="font-bold text-${gainColor === 'green' ? 'emerald-600' : 'rose-500'} text-xl">${sign}${profitLossPct}%</p>
-                            <p class="text-xs text-${gainColor === 'green' ? 'emerald-500' : 'rose-400'} mt-0.5">${sign}${formatCurrency(profitLoss)}</p>
+                            <p class="font-bold text-${gainColor === 'green' ? 'emerald-600' : 'rose-500'} text-base sm:text-xl">${sign}${profitLossPct}%</p>
+                            <p class="text-xs text-${gainColor === 'green' ? 'emerald-500' : 'rose-400'} mt-0.5 break-all">${sign}${formatCurrency(profitLoss)}</p>
                         </div>
-                        <div class="text-right text-xs text-gray-400">
+                        <div class="text-right text-[10px] sm:text-xs text-gray-400 shrink-0 max-w-[45%]">
                             <p>${formatPrice(buy)}</p>
                             <p class="text-gray-300">↓</p>
                             <p class="font-semibold text-${gainColor === 'green' ? 'emerald-600' : 'rose-400'}">${formatPrice(current)}</p>
@@ -2646,9 +2646,9 @@ async function renderTokens(allTokens, options = {}) {
                     </div>
 
                     <!-- P/L latent HIFO — net mis en avant (aligné dashboard) -->
-                    <div class="rounded-xl px-3 py-4 bg-slate-50 border border-slate-200/90 text-center">
+                    <div class="rounded-xl px-2.5 sm:px-3 py-3 sm:py-4 bg-slate-50 border border-slate-200/90 text-center min-w-0">
                         <p class="text-[10px] sm:text-xs text-slate-500 font-medium mb-2">📊 P/L latent (HIFO)</p>
-                        <p class="text-3xl sm:text-4xl font-extrabold tracking-tight leading-tight ${hifoNetTextClass}">
+                        <p class="text-2xl sm:text-4xl font-extrabold tracking-tight leading-tight break-all ${hifoNetTextClass}">
                             ${hifoNetSign}${formatCurrency(hifoNet)}
                         </p>
                         <p class="text-[10px] text-slate-400 mt-1.5 mb-2">Net position ouverte</p>
@@ -2659,15 +2659,15 @@ async function renderTokens(allTokens, options = {}) {
                     </div>
 
                     <!-- Gain vs 24h -->
-                    <div class="bg-${has24h ? (color24 === 'green' ? 'emerald' : 'rose') : 'gray'}-50 rounded-xl p-3 flex items-center justify-between">
-                        <div>
+                    <div class="bg-${has24h ? (color24 === 'green' ? 'emerald' : 'rose') : 'gray'}-50 rounded-xl p-2.5 sm:p-3 flex items-center justify-between gap-2 min-w-0">
+                        <div class="min-w-0 flex-1">
                             <p class="text-xs text-teal-500">🕐 Gain vs 24h</p>
-                            <p class="font-bold text-${has24h ? (color24 === 'green' ? 'emerald-600' : 'rose-500') : 'gray-400'} text-xl">
+                            <p class="font-bold text-${has24h ? (color24 === 'green' ? 'emerald-600' : 'rose-500') : 'gray-400'} text-base sm:text-xl">
                                 ${has24h ? `${sign24}${change24h}%` : 'Pas encore de données 24h'}
                             </p>
                         </div>
                         ${has24h ? `
-                        <div class="text-right text-xs text-gray-400">
+                        <div class="text-right text-[10px] sm:text-xs text-gray-400 shrink-0 max-w-[45%]">
                             <p>${formatPrice(p24h)}</p>
                             <p class="text-gray-300">↓</p>
                             <p class="font-semibold text-${color24 === 'green' ? 'emerald-600' : 'rose-400'}">${formatPrice(current)}</p>
