@@ -577,10 +577,12 @@ def _hifo_dashboard_gain_loss_net(
     return total_gain, total_loss, net_total, rg, rl
 
 
-def _hifo_per_token_gain_loss_dict(cursor, wallet: str, sol_usd: float) -> dict[int, dict[str, float]]:
+def _hifo_per_token_gain_loss_and_open_avg(
+    cursor, wallet: str, sol_usd: float
+) -> tuple[dict[int, dict[str, float]], dict[int, float]]:
     """
-    P/L **latent** uniquement (positions encore ouvertes) : valeur actuelle − coût HIFO des lots restants.
-    Token entièrement vendu → gain/loss/net à 0 (l’historique des ventes est dans les transactions / détail HIFO).
+    P/L latent par token + prix moyen USD/token des **lots encore détenus** (même coût HIFO que le P/L latent).
+    Le second dict sert d’affichage « prix d’achat » cohérent après vente totale puis rachat (pas le VWAP de tout l’historique).
     """
     _gain_per_sale, lots_by_token = _hifo_gain_per_sale_and_lots(cursor, wallet, sol_usd)
 
@@ -593,6 +595,7 @@ def _hifo_per_token_gain_loss_dict(cursor, wallet: str, sol_usd: float) -> dict[
         {"wallet": wallet, "wsol_mint": SOL_MINT},
     )
     out: dict[int, dict[str, float]] = {}
+    open_avg_usd: dict[int, float] = {}
     for row in cursor.fetchall():
         tid = int(row["id"])
         ct = float(row["current_tokens"] or 0)
@@ -609,13 +612,24 @@ def _hifo_per_token_gain_loss_dict(cursor, wallet: str, sol_usd: float) -> dict[
                 rem_cost *= ct / sum_lot_rem
             ux = market - rem_cost
             latent_pnl_pct = (100.0 * ux / rem_cost) if rem_cost > 1e-9 else None
+            if rem_cost > 1e-9:
+                open_avg_usd[tid] = rem_cost / ct
         else:
             ux = 0.0
             latent_pnl_pct = None
         ug = max(0.0, ux)
         ul = abs(min(0.0, ux))
         out[tid] = {"gain": ug, "loss": ul, "net": ug - ul, "latent_pnl_pct": latent_pnl_pct}
-    return out
+    return out, open_avg_usd
+
+
+def _hifo_per_token_gain_loss_dict(cursor, wallet: str, sol_usd: float) -> dict[int, dict[str, float]]:
+    """
+    P/L **latent** uniquement (positions encore ouvertes) : valeur actuelle − coût HIFO des lots restants.
+    Token entièrement vendu → gain/loss/net à 0 (l’historique des ventes est dans les transactions / détail HIFO).
+    """
+    hmap, _ = _hifo_per_token_gain_loss_and_open_avg(cursor, wallet, sol_usd)
+    return hmap
 
 
 def _sync_tokens_gain_loss_hifo_for_wallets(conn, sol_usd: float, wallet_addresses: list) -> None:
@@ -2280,20 +2294,31 @@ async def get_tokens(wallet: Optional[str] = Query(None)):
         wkey = str(wallet).strip()
         vwap_usd = _purchase_vwap_usd_by_token(cursor, wkey, sol_usd)
         try:
-            hifo_map = _hifo_per_token_gain_loss_dict(cursor, wkey, sol_usd)
+            hifo_map, open_avg_usd = _hifo_per_token_gain_loss_and_open_avg(cursor, wkey, sol_usd)
         except Exception as e:
             print(f"[!] get_tokens HIFO overlay: {e}")
             hifo_map = {}
+            open_avg_usd = {}
         for token in token_rows:
             t = dict(token)
             t["price_24h_ago"] = price_24h.get(t["id"])
             sol_at_buy = t.get("sol_usd_at_buy")
             tid = int(t["id"])
-            vw = vwap_usd.get(tid)
-            if vw is not None and vw > 0:
-                t["purchase_price_usd"] = vw
+            ct = float(t.get("current_tokens") or 0)
+            oa = open_avg_usd.get(tid)
+            if (
+                ct > 1e-12
+                and oa is not None
+                and oa > 0
+                and str(t.get("address") or "") != str(SOL_MINT)
+            ):
+                t["purchase_price_usd"] = oa
             else:
-                t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
+                vw = vwap_usd.get(tid)
+                if vw is not None and vw > 0:
+                    t["purchase_price_usd"] = vw
+                else:
+                    t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
             hid = hifo_map.get(int(t["id"]))
             if hid is not None and str(t.get("address") or "") != str(SOL_MINT):
                 t["gain"] = hid["gain"]
@@ -2317,15 +2342,27 @@ async def get_token(token_id: int):
         if not token:
             raise HTTPException(status_code=404, detail="Token non trouvé")
         t = dict(token)
-        vw = _purchase_vwap_usd_for_token_id(cursor, token_id, sol_usd)
-        if vw is not None and vw > 0:
-            t["purchase_price_usd"] = vw
-        else:
-            sol_at_buy = t.get("sol_usd_at_buy")
-            t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
         wa = (t.get("wallet_address") or "").strip()
+        ct = float(t.get("current_tokens") or 0)
+        hifo_map_one: dict[int, dict[str, float]] = {}
+        open_avg_usd: dict[int, float] = {}
         if len(wa) >= 20 and str(t.get("address") or "") != str(SOL_MINT):
-            hid = _hifo_per_token_gain_loss_dict(cursor, wa, sol_usd).get(token_id)
+            try:
+                hifo_map_one, open_avg_usd = _hifo_per_token_gain_loss_and_open_avg(cursor, wa, sol_usd)
+            except Exception as e:
+                print(f"[!] get_token HIFO: {e}")
+        oa = open_avg_usd.get(token_id)
+        if ct > 1e-12 and oa is not None and oa > 0 and str(t.get("address") or "") != str(SOL_MINT):
+            t["purchase_price_usd"] = oa
+        else:
+            vw = _purchase_vwap_usd_for_token_id(cursor, token_id, sol_usd)
+            if vw is not None and vw > 0:
+                t["purchase_price_usd"] = vw
+            else:
+                sol_at_buy = t.get("sol_usd_at_buy")
+                t["purchase_price_usd"] = (t.get("purchase_price") or 0) * sol_at_buy if sol_at_buy else (t.get("purchase_price") or 0)
+        if len(wa) >= 20 and str(t.get("address") or "") != str(SOL_MINT):
+            hid = hifo_map_one.get(token_id)
             if hid is not None:
                 t["gain"] = hid["gain"]
                 t["loss"] = hid["loss"]

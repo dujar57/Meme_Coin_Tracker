@@ -200,3 +200,55 @@ def test_fully_sold_token_zero_latent_realized_still_computed():
     assert pmap[1]["latent_pnl_pct"] is None
 
     conn.close()
+
+
+def test_open_avg_buy_after_full_sell_and_rebuy_not_vwap_all_purchases():
+    """
+    Après vente totale puis rachat moins cher, le coût moyen position = dernier lot (HIFO restant),
+    pas le VWAP (achat cher + achat bon marché) / somme des tokens achetés.
+    """
+    wallet = "44444444444444444444444444444444"
+    mint = "TokenMint4444444444444444444444444444444444"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 100.0, 100.0, 1.0)
+        """,
+        (mint, wallet),
+    )
+    # Achat 1 : 100 tokens, 2 SOL, SOL/USD=100 -> 2 USD/token, 200 USD de coût
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date)
+        VALUES (1, 1, ?, 1000, 100.0, 2.0, 100.0, '2024-01-01')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date)
+        VALUES (1, 1, 100.0, 1.0, 100.0, 1500, '2024-01-02')
+        """,
+    )
+    # Achat 2 : 100 tokens, 1 SOL -> 1 USD/token, 100 USD (éligible seulement après la vente)
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date)
+        VALUES (2, 1, ?, 2000, 100.0, 1.0, 100.0, '2024-03-01')
+        """,
+        (wallet,),
+    )
+    conn.commit()
+
+    sol_usd = 100.0
+    vwap = m._purchase_vwap_usd_for_token_id(c, 1, sol_usd)
+    assert pytest.approx(vwap, rel=1e-6) == 1.5  # (200+100)/200 tokens
+
+    _hmap, open_avg = m._hifo_per_token_gain_loss_and_open_avg(c, wallet, sol_usd)
+    assert pytest.approx(open_avg[1], rel=1e-6) == 1.0  # coût lots restants / 100
+
+    conn.close()
