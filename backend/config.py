@@ -21,9 +21,12 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ENV = os.getenv("ENV", "development")
 IS_PROD = ENV.lower() == "production"
 
-# PostgreSQL (ex. Neon) : activer explicitement avec DATABASE_BACKEND=postgres + DATABASE_URL
+# PostgreSQL (ex. Neon) : DATABASE_BACKEND=postgres ou DATABASE_MODE=postgres (alias docs / render.yaml) + DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-DATABASE_BACKEND = os.getenv("DATABASE_BACKEND", "sqlite").strip().lower()
+_db_backend = os.getenv("DATABASE_BACKEND", "").strip().lower()
+if not _db_backend:
+    _db_backend = os.getenv("DATABASE_MODE", "sqlite").strip().lower()
+DATABASE_BACKEND = _db_backend or "sqlite"
 USE_POSTGRES = bool(DATABASE_URL) and DATABASE_BACKEND == "postgres"
 
 

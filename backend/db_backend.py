@@ -1,8 +1,8 @@
 """
 Couche base de données : SQLite (défaut) ou PostgreSQL (Neon, Render) via DATABASE_URL.
 
-Active Postgres seulement si DATABASE_URL est défini ET DATABASE_BACKEND=postgres
-(évite d’utiliser une URL résiduelle par erreur).
+Active Postgres si DATABASE_URL est défini et DATABASE_BACKEND=postgres
+(ou DATABASE_MODE=postgres, alias documentation / render.yaml).
 """
 from __future__ import annotations
 
@@ -77,6 +77,9 @@ def adapt_sql_postgres(sql: str) -> str:
 
     s = s.replace("IFNULL(", "COALESCE(")
     s = s.replace("MAX(0.0,", "GREATEST(0.0,")
+
+    # rowid = SQLite ; nos requêtes l’utilisent sur des tables avec clé id (sérial)
+    s = re.sub(r"\bORDER\s+BY\s+rowid\s+DESC\b", "ORDER BY id DESC", s, flags=re.I)
 
     s = s.replace("?", "%s")
     return s
