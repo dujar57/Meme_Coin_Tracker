@@ -105,6 +105,66 @@ _SWAP_INTERMEDIATE_STABLE_MINTS: frozenset[str] = frozenset(
     }
 )
 
+# Comptes Jito tip (MEV) — exclure des transferts natifs « sortants » du wallet
+JITO_TIP_ACCOUNTS: frozenset[str] = frozenset(
+    {
+        "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+        "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+        "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+        "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1sTaC4qeRBz",
+        "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+        "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+        "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+    }
+)
+
+
+def _native_sol_out_amounts_lamports(wallet_address: str, native_transfers: list) -> list[int]:
+    """Montants lamports de chaque transfert natif sortant du wallet (hors tips Jito)."""
+    out: list[int] = []
+    for nt in native_transfers:
+        if (
+            nt.get("fromUserAccount") == wallet_address
+            and nt.get("toUserAccount") != wallet_address
+            and nt.get("toUserAccount") not in JITO_TIP_ACCOUNTS
+        ):
+            try:
+                a = int(nt.get("amount", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if a > 0:
+                out.append(a)
+    return out
+
+
+def _estimate_swap_sol_spent_lamports(amounts: list[int]) -> int:
+    """
+    Helius agrège parfois plusieurs gros envois SOL dans la même signature (swap + autre instruction).
+    Sommer tout surestime le coût → prix d'achat / token trop haut. On garde souvent le plus gros leg
+    quand il domine clairement ; sinon on garde la somme (vrais swaps multi-leg).
+    """
+    if not amounts:
+        return 0
+    if len(amounts) == 1:
+        return amounts[0]
+    sorted_a = sorted(amounts, reverse=True)
+    total = sum(sorted_a)
+    mx = sorted_a[0]
+    second = sorted_a[1]
+    TIP_LAMPORTS = 1_500_000  # ~0.0015 SOL — tips typiques
+    RENT_CEILING = 5_000_000  # ~0.005 SOL — création ATA / petites réserves
+    non_tiny = [x for x in sorted_a if x >= TIP_LAMPORTS]
+    if len(non_tiny) == 1:
+        return non_tiny[0]
+    if len(non_tiny) >= 2 and non_tiny[1] <= RENT_CEILING:
+        rest = total - non_tiny[1]
+        if rest > 0 and non_tiny[0] >= int(rest * 0.92):
+            return non_tiny[0]
+    if second > 0 and mx >= int(second * 1.45) and mx >= int(total * 0.52):
+        return mx
+    return total
+
 
 def _helius_merge_token_transfers_by_mint(transfers: list) -> list:
     """
@@ -4792,18 +4852,6 @@ async def helius_import_swaps(
 
     # Collecter tous les mints uniques via tokenTransfers pour résoudre leurs noms
 
-    # Comptes Jito tip (MEV) — le SOL envoyé vers ces adresses ne fait pas partie du swap
-    JITO_TIP_ACCOUNTS = {
-        "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-        "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
-        "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-        "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1sTaC4qeRBz",
-        "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-        "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-        "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-    }
-
     all_mints: set[str] = set()
     for tx in swaps_fetched:
         for tr in tx.get("tokenTransfers", []):
@@ -4918,13 +4966,8 @@ async def helius_import_swaps(
 
                 # SOL envoyé par le wallet vers des tiers (hors tips Jito, hors lui-même)
                 # → utilisé pour calculer sol_spent sur les achats natifs
-                native_sol_out_lamports = sum(
-                    int(nt.get("amount", 0) or 0)
-                    for nt in native_transfers
-                    if nt.get("fromUserAccount") == wallet_address
-                    and nt.get("toUserAccount") != wallet_address
-                    and nt.get("toUserAccount") not in JITO_TIP_ACCOUNTS
-                )
+                native_sol_out_amounts = _native_sol_out_amounts_lamports(wallet_address, native_transfers)
+                native_sol_out_lamports = sum(native_sol_out_amounts)
                 # SOL reçu par le wallet depuis des tiers (hors lui-même)
                 # → utilisé pour calculer sol_recv sur les ventes natives
                 native_sol_in_lamports = sum(
@@ -5016,7 +5059,7 @@ async def helius_import_swaps(
                     if wsol_sent > 0:
                         sol_spent = wsol_sent
                     elif native_sol_out_lamports > 0:
-                        sol_spent = native_sol_out_lamports / LAMPORTS_PER_SOL
+                        sol_spent = _estimate_swap_sol_spent_lamports(native_sol_out_amounts) / LAMPORTS_PER_SOL
                     else:
                         sol_spent = max(0.0, (abs(wallet_sol_change) - fee_lamports) / LAMPORTS_PER_SOL)
 
