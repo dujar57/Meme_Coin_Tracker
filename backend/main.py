@@ -642,10 +642,10 @@ def _remaining_avg_cost_and_pos_by_token_ids(
     cursor, token_ids: list[int], sol_usd_fallback: float
 ) -> tuple[dict[int, float], dict[int, float]]:
     """
-    (coût USD restant, position token simulée) par token_id, à partir des purchases/sales
-    en ordre chronologique — réduction proportionnelle du coût à chaque vente (pas HIFO).
-    Après une vente totale puis un rachat, le coût restant = somme des achats du cycle actuel
-    (souvent proche du dernier montant USD dépensé).
+    (coût USD restant, position token simulée) par token_id : uniquement les événements **après
+    la dernière fois** où la position simulée est tombée à zéro, puis coût moyen résiduel
+    (réduction proportionnelle à chaque vente). Évite d’empiler d’anciens achats quand tu as tout
+    vendu puis racheté. Si la position n’a jamais été à zéro dans les données, on garde tout l’historique.
     """
     if not token_ids:
         return {}, {}
@@ -694,9 +694,22 @@ def _remaining_avg_cost_and_pos_by_token_ids(
     out_pos: dict[int, float] = {}
     for tid in ids:
         events = sorted(by_tid.get(tid, []), key=lambda e: (e[0], e[1], e[5]))
+        run_start = 0
+        pos_scan = 0.0
+        for i, ev in enumerate(events):
+            _ts, _ord, kind, qty, usd, _rid = ev
+            if kind == "buy":
+                pos_scan += qty
+            else:
+                s = min(qty, pos_scan)
+                pos_scan -= s
+                if pos_scan < 1e-12:
+                    pos_scan = 0.0
+                    run_start = i + 1
+        tail = events[run_start:]
         pos = 0.0
         cost = 0.0
-        for ev in events:
+        for ev in tail:
             _ts, _ord, kind, qty, usd, _rid = ev
             if kind == "buy":
                 pos += qty
@@ -743,8 +756,9 @@ def _overlay_position_cost_display(
         return
     sp = auto_pos_by_tid.get(tid)
     ucost = float(ac)
-    if sp is not None and sp > 1e-12:
-        if abs(sp - ct) > max(1e-9, 1e-6 * max(sp, ct)):
+    # Si l’import sous-compte les tokens (sp < ct), ne **pas** majorer le coût (évite P/L trop négatif).
+    if sp is not None and sp > 1e-12 and abs(sp - ct) > max(1e-9, 1e-6 * max(sp, ct)):
+        if sp > ct:
             ucost *= ct / sp
     t["position_cost_display_source"] = "auto_txn"
     _apply_display_position_cost_usd(t, ucost)

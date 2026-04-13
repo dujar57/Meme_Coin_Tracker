@@ -258,6 +258,49 @@ def test_open_avg_buy_after_full_sell_and_rebuy_not_vwap_all_purchases():
     conn.close()
 
 
+def test_auto_cost_ignores_buys_before_last_full_exit():
+    """Après vente totale, seuls les achats du cycle courant comptent pour le coût auto."""
+    wallet = "66666666666666666666666666666666"
+    mint = "TokenMint6666666666666666666666666666666666"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 100.0, 100.0, 1.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 100, 100.0, 5.0, 100.0, '2024-01-01', 'a1')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 1.0, 100.0, 200, '2024-01-02', 's1')
+        """,
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (2, 1, ?, 300, 100.0, 0.8, 100.0, '2024-03-01', 'a2')
+        """,
+        (wallet,),
+    )
+    conn.commit()
+    cost_map, pos_map = m._remaining_avg_cost_and_pos_by_token_ids(c, [1], 100.0)
+    assert pytest.approx(cost_map[1], rel=1e-6) == 80.0
+    assert pytest.approx(pos_map[1], rel=1e-6) == 100.0
+
+    conn.close()
+
+
 def test_auto_remaining_cost_partial_sell_halves_cost():
     """Vente partielle : coût restant = coût initial × (tokens restants / tokens avant vente)."""
     wallet = "55555555555555555555555555555555"
