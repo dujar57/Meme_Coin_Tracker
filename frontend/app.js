@@ -2616,7 +2616,7 @@ async function renderTokens(allTokens, options = {}) {
                         <div class="bg-teal-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-teal-500 mb-1">Prix d'achat</p>
                             <p class="font-bold text-teal-700 text-sm sm:text-base break-all">${formatPrice(buy)}</p>
-                            ${token.user_position_cost_usd != null && Number(token.user_position_cost_usd) > 0 ? `<p class="text-[10px] text-amber-700 mt-1 font-medium">Coût réel saisi</p>` : ''}
+                            ${token.position_cost_display_source === 'manual' ? `<p class="text-[10px] text-amber-700 mt-1 font-medium">Coût réel saisi</p>` : token.position_cost_display_source === 'auto_txn' ? `<p class="text-[10px] text-teal-600 mt-1 font-medium">Coût dérivé achats/ventes</p>` : ''}
                         </div>
                         <div class="bg-cyan-50 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
                             <p class="text-xs text-cyan-500 mb-1">Prix actuel</p>

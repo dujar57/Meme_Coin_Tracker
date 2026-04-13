@@ -623,25 +623,10 @@ def _hifo_per_token_gain_loss_and_open_avg(
     return out, open_avg_usd
 
 
-def _overlay_user_position_cost_usd(t: dict) -> None:
-    """
-    Si l'utilisateur a saisi user_position_cost_usd (coût total USD de la position ouverte),
-    l'affichage carte utilise ce montant pour prix d'achat USD/token et P/L latent — pas l'import HIFO.
-    L'historique des transactions / HIFO des ventes reste inchangé.
-    """
+def _apply_display_position_cost_usd(t: dict, ucost: float) -> None:
+    """Met à jour prix d'achat USD/token, gain/loss et % latent à partir d'un coût total USD de position."""
     ct = float(t.get("current_tokens") or 0)
-    if ct <= 1e-12:
-        return
-    if str(t.get("address") or "") == str(SOL_MINT):
-        return
-    raw = t.get("user_position_cost_usd")
-    if raw is None:
-        return
-    try:
-        ucost = float(raw)
-    except (TypeError, ValueError):
-        return
-    if not math.isfinite(ucost) or ucost <= 1e-9:
+    if ct <= 1e-12 or not math.isfinite(ucost) or ucost <= 1e-9:
         return
     cv = float(t.get("current_value") or 0)
     cp = float(t.get("current_price") or 0)
@@ -651,6 +636,118 @@ def _overlay_user_position_cost_usd(t: dict) -> None:
     t["latent_pnl_pct"] = round((100.0 * ux / ucost), 4) if ucost > 1e-9 else None
     t["gain"] = max(0.0, ux)
     t["loss"] = abs(min(0.0, ux))
+
+
+def _remaining_avg_cost_and_pos_by_token_ids(
+    cursor, token_ids: list[int], sol_usd_fallback: float
+) -> tuple[dict[int, float], dict[int, float]]:
+    """
+    (coût USD restant, position token simulée) par token_id, à partir des purchases/sales
+    en ordre chronologique — réduction proportionnelle du coût à chaque vente (pas HIFO).
+    Après une vente totale puis un rachat, le coût restant = somme des achats du cycle actuel
+    (souvent proche du dernier montant USD dépensé).
+    """
+    if not token_ids:
+        return {}, {}
+    ids = sorted({int(x) for x in token_ids})
+    ph = ",".join("?" * len(ids))
+    cursor.execute(
+        f"""
+        SELECT token_id, tokens_bought, sol_spent,
+               COALESCE(NULLIF(sol_usd_at_buy, 0), ?) AS rate,
+               COALESCE(purchase_timestamp, 0) AS ts, id
+        FROM purchases
+        WHERE token_id IN ({ph}) AND tokens_bought > 0 AND sol_spent > 0
+        ORDER BY token_id, ts ASC, id ASC
+        """,
+        (sol_usd_fallback, *ids),
+    )
+    by_tid: dict[int, list[tuple]] = defaultdict(list)
+    for r in cursor.fetchall():
+        d = dict(r)
+        tid = int(d["token_id"])
+        rate = float(d["rate"] or sol_usd_fallback)
+        usd = float(d["sol_spent"] or 0) * rate
+        qty = float(d["tokens_bought"] or 0)
+        ts = int(d["ts"] or 0)
+        rid = int(d["id"])
+        by_tid[tid].append((ts, 0, "buy", qty, usd, rid))
+
+    cursor.execute(
+        f"""
+        SELECT token_id, tokens_sold, COALESCE(sale_timestamp, 0) AS ts, id
+        FROM sales
+        WHERE token_id IN ({ph})
+        ORDER BY token_id, ts ASC, id ASC
+        """,
+        ids,
+    )
+    for r in cursor.fetchall():
+        d = dict(r)
+        tid = int(d["token_id"])
+        qty = float(d["tokens_sold"] or 0)
+        ts = int(d["ts"] or 0)
+        rid = int(d["id"])
+        by_tid[tid].append((ts, 1, "sell", qty, 0.0, rid))
+
+    out_cost: dict[int, float] = {}
+    out_pos: dict[int, float] = {}
+    for tid in ids:
+        events = sorted(by_tid.get(tid, []), key=lambda e: (e[0], e[1], e[5]))
+        pos = 0.0
+        cost = 0.0
+        for ev in events:
+            _ts, _ord, kind, qty, usd, _rid = ev
+            if kind == "buy":
+                pos += qty
+                cost += usd
+            else:
+                s = min(qty, pos)
+                if pos > 1e-12:
+                    cost *= (pos - s) / pos
+                pos -= s
+                if pos < 1e-12:
+                    pos = 0.0
+                    cost = 0.0
+        if pos > 1e-8 and cost > 1e-9:
+            out_cost[tid] = cost
+            out_pos[tid] = pos
+    return out_cost, out_pos
+
+
+def _overlay_position_cost_display(
+    t: dict, auto_cost_by_tid: dict[int, float], auto_pos_by_tid: dict[int, float]
+) -> None:
+    """
+    Carte token : 1) user_position_cost_usd saisi 2) sinon coût dérivé des lignes achats/ventes
+    (moyenne restante) 3) sinon garder HIFO / VWAP déjà appliqués.
+    """
+    ct = float(t.get("current_tokens") or 0)
+    if ct <= 1e-12:
+        return
+    if str(t.get("address") or "") == str(SOL_MINT):
+        return
+    tid = int(t["id"])
+    raw = t.get("user_position_cost_usd")
+    if raw is not None:
+        try:
+            v = float(raw)
+            if math.isfinite(v) and v > 1e-9:
+                t["position_cost_display_source"] = "manual"
+                _apply_display_position_cost_usd(t, v)
+                return
+        except (TypeError, ValueError):
+            pass
+    ac = auto_cost_by_tid.get(tid)
+    if ac is None or ac <= 1e-9:
+        return
+    sp = auto_pos_by_tid.get(tid)
+    ucost = float(ac)
+    if sp is not None and sp > 1e-12:
+        if abs(sp - ct) > max(1e-9, 1e-6 * max(sp, ct)):
+            ucost *= ct / sp
+    t["position_cost_display_source"] = "auto_txn"
+    _apply_display_position_cost_usd(t, ucost)
 
 
 def _hifo_per_token_gain_loss_dict(cursor, wallet: str, sol_usd: float) -> dict[int, dict[str, float]]:
@@ -2333,6 +2430,18 @@ async def get_tokens(wallet: Optional[str] = Query(None)):
             print(f"[!] get_tokens HIFO overlay: {e}")
             hifo_map = {}
             open_avg_usd = {}
+        tid_non_wsol = [
+            int(dict(tr)["id"])
+            for tr in token_rows
+            if str(dict(tr).get("address") or "") != str(SOL_MINT)
+        ]
+        try:
+            auto_cost_map, auto_pos_map = _remaining_avg_cost_and_pos_by_token_ids(
+                cursor, tid_non_wsol, sol_usd
+            )
+        except Exception as e:
+            print(f"[!] get_tokens auto position cost: {e}")
+            auto_cost_map, auto_pos_map = {}, {}
         for token in token_rows:
             t = dict(token)
             t["price_24h_ago"] = price_24h.get(t["id"])
@@ -2360,7 +2469,7 @@ async def get_tokens(wallet: Optional[str] = Query(None)):
                 lp = hid.get("latent_pnl_pct")
                 if lp is not None and isinstance(lp, (int, float)) and math.isfinite(float(lp)):
                     t["latent_pnl_pct"] = round(float(lp), 4)
-            _overlay_user_position_cost_usd(t)
+            _overlay_position_cost_display(t, auto_cost_map, auto_pos_map)
             result.append(t)
         return result
 
@@ -2404,7 +2513,14 @@ async def get_token(token_id: int):
                 lp = hid.get("latent_pnl_pct")
                 if lp is not None and isinstance(lp, (int, float)) and math.isfinite(float(lp)):
                     t["latent_pnl_pct"] = round(float(lp), 4)
-        _overlay_user_position_cost_usd(t)
+        try:
+            auto_cost_map, auto_pos_map = _remaining_avg_cost_and_pos_by_token_ids(
+                cursor, [token_id], sol_usd
+            )
+        except Exception as e:
+            print(f"[!] get_token auto position cost: {e}")
+            auto_cost_map, auto_pos_map = {}, {}
+        _overlay_position_cost_display(t, auto_cost_map, auto_pos_map)
         return t
 
 @app.get("/api/tokens/{token_id}/purchases")

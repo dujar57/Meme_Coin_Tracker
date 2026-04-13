@@ -251,4 +251,44 @@ def test_open_avg_buy_after_full_sell_and_rebuy_not_vwap_all_purchases():
     _hmap, open_avg = m._hifo_per_token_gain_loss_and_open_avg(c, wallet, sol_usd)
     assert pytest.approx(open_avg[1], rel=1e-6) == 1.0  # coût lots restants / 100
 
+    cost_map, pos_map = m._remaining_avg_cost_and_pos_by_token_ids(c, [1], sol_usd)
+    assert pytest.approx(cost_map[1], rel=1e-6) == 100.0  # dernier achat seul (cycle actuel)
+    assert pytest.approx(pos_map[1], rel=1e-6) == 100.0
+
+    conn.close()
+
+
+def test_auto_remaining_cost_partial_sell_halves_cost():
+    """Vente partielle : coût restant = coût initial × (tokens restants / tokens avant vente)."""
+    wallet = "55555555555555555555555555555555"
+    mint = "TokenMint5555555555555555555555555555555555"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 50.0, 50.0, 1.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 100.0, 1.0, 100.0, '2024-01-01', 'sigbuy1')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 50.0, 0.5, 100.0, 2000, '2024-01-02', 'sigsell1')
+        """,
+    )
+    conn.commit()
+    cost_map, pos_map = m._remaining_avg_cost_and_pos_by_token_ids(c, [1], 100.0)
+    assert pytest.approx(cost_map[1], rel=1e-6) == 50.0
+    assert pytest.approx(pos_map[1], rel=1e-6) == 50.0
+
     conn.close()
