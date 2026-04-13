@@ -544,28 +544,47 @@ def _hifo_dashboard_gain_loss_net(
     wf = "AND wallet_address = :wallet"
     cursor.execute(
         f"""
-        SELECT id, current_tokens, current_value, current_price
+        SELECT id, current_tokens, current_value, current_price, address, user_position_cost_usd
         FROM tokens
         WHERE 1=1 {wf} AND {_token_non_wsol_clause('tokens')}
         """,
         {"wallet": wallet, "wsol_mint": SOL_MINT},
     )
+    rows = list(cursor.fetchall())
+    tids = [int(dict(r)["id"]) for r in rows]
+    try:
+        auto_cost_map, auto_pos_map = _remaining_avg_cost_and_pos_by_token_ids(cursor, tids, sol_usd)
+    except Exception as e:
+        print(f"[!] dashboard auto position cost: {e}")
+        auto_cost_map, auto_pos_map = {}, {}
     ug = ul = 0.0
-    for row in cursor.fetchall():
-        tid = int(row["id"])
-        ct = float(row["current_tokens"] or 0)
+    for row in rows:
+        r = dict(row)
+        tid = int(r["id"])
+        ct = float(r["current_tokens"] or 0)
         if ct <= 1e-12:
             continue
-        cv = float(row["current_value"] or 0)
-        cp = float(row["current_price"] or 0)
+        cv = float(r["current_value"] or 0)
+        cp = float(r["current_price"] or 0)
         market = cv if cv > 0 else ct * cp
-        rem_cost = _hifo_remaining_cost_usd(lots_by_token, tid)
-        sum_lot_rem = sum(
-            float(l.get("remaining") or 0) for l in (lots_by_token.get(tid) or [])
+        display_cost = _display_position_cost_usd_total(
+            tid,
+            ct,
+            r.get("address"),
+            r.get("user_position_cost_usd"),
+            auto_cost_map,
+            auto_pos_map,
         )
-        if sum_lot_rem > 1e-12 and abs(sum_lot_rem - ct) > max(1e-9, 1e-6 * max(ct, 1.0)):
-            rem_cost *= ct / sum_lot_rem
-        ux = market - rem_cost
+        if display_cost is not None:
+            ux = market - display_cost
+        else:
+            rem_cost = _hifo_remaining_cost_usd(lots_by_token, tid)
+            sum_lot_rem = sum(
+                float(l.get("remaining") or 0) for l in (lots_by_token.get(tid) or [])
+            )
+            if sum_lot_rem > 1e-12 and abs(sum_lot_rem - ct) > max(1e-9, 1e-6 * max(ct, 1.0)):
+                rem_cost *= ct / sum_lot_rem
+            ux = market - rem_cost
         if ux > 0:
             ug += ux
         else:
@@ -621,6 +640,48 @@ def _hifo_per_token_gain_loss_and_open_avg(
         ul = abs(min(0.0, ux))
         out[tid] = {"gain": ug, "loss": ul, "net": ug - ul, "latent_pnl_pct": latent_pnl_pct}
     return out, open_avg_usd
+
+
+def _parsed_manual_user_position_cost_usd(raw) -> float | None:
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+        if math.isfinite(v) and v > 1e-9:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _display_position_cost_usd_total(
+    tid: int,
+    ct: float,
+    address: str | None,
+    user_position_cost_raw,
+    auto_cost_by_tid: dict[int, float],
+    auto_pos_by_tid: dict[int, float],
+) -> float | None:
+    """
+    Coût total USD pour le P/L latent « affiché » (saisie manuelle ou auto achats/ventes).
+    None → utiliser le coût HIFO (lots restants) à la place.
+    """
+    if ct <= 1e-12:
+        return None
+    if str(address or "") == str(SOL_MINT):
+        return None
+    mv = _parsed_manual_user_position_cost_usd(user_position_cost_raw)
+    if mv is not None:
+        return mv
+    ac = auto_cost_by_tid.get(tid)
+    if ac is None or ac <= 1e-9:
+        return None
+    sp = auto_pos_by_tid.get(tid)
+    ucost = float(ac)
+    if sp is not None and sp > 1e-12 and abs(sp - ct) > max(1e-9, 1e-6 * max(sp, ct)):
+        if sp > ct:
+            ucost *= ct / sp
+    return ucost
 
 
 def _apply_display_position_cost_usd(t: dict, ucost: float) -> None:
@@ -738,29 +799,20 @@ def _overlay_position_cost_display(
     ct = float(t.get("current_tokens") or 0)
     if ct <= 1e-12:
         return
-    if str(t.get("address") or "") == str(SOL_MINT):
-        return
     tid = int(t["id"])
-    raw = t.get("user_position_cost_usd")
-    if raw is not None:
-        try:
-            v = float(raw)
-            if math.isfinite(v) and v > 1e-9:
-                t["position_cost_display_source"] = "manual"
-                _apply_display_position_cost_usd(t, v)
-                return
-        except (TypeError, ValueError):
-            pass
-    ac = auto_cost_by_tid.get(tid)
-    if ac is None or ac <= 1e-9:
+    ucost = _display_position_cost_usd_total(
+        tid,
+        ct,
+        t.get("address"),
+        t.get("user_position_cost_usd"),
+        auto_cost_by_tid,
+        auto_pos_by_tid,
+    )
+    if ucost is None:
         return
-    sp = auto_pos_by_tid.get(tid)
-    ucost = float(ac)
-    # Si l’import sous-compte les tokens (sp < ct), ne **pas** majorer le coût (évite P/L trop négatif).
-    if sp is not None and sp > 1e-12 and abs(sp - ct) > max(1e-9, 1e-6 * max(sp, ct)):
-        if sp > ct:
-            ucost *= ct / sp
-    t["position_cost_display_source"] = "auto_txn"
+    t["position_cost_display_source"] = (
+        "manual" if _parsed_manual_user_position_cost_usd(t.get("user_position_cost_usd")) is not None else "auto_txn"
+    )
     _apply_display_position_cost_usd(t, ucost)
 
 

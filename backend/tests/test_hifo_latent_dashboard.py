@@ -30,6 +30,7 @@ def _mk_schema(conn: sqlite3.Connection) -> None:
             invested_amount REAL,
             purchased_tokens REAL,
             sol_usd_at_buy REAL,
+            user_position_cost_usd REAL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE purchases (
