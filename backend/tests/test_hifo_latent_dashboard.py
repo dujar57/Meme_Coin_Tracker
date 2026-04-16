@@ -485,6 +485,25 @@ def test_hifo_cap_uses_user_position_cost_when_purchases_and_token_both_inflated
     conn.close()
 
 
+def test_repair_skipped_when_purchase_cap_low_vs_sale_moon():
+    """Σ achats BDD faible vs recettes : ne pas forcer un coût haut (vraie lune)."""
+    gain = {1: {"sell_usd": 100.0, "buy_usd": 5.0, "pnl_usd": 95.0}}
+    sales = [{"sale_id": 1, "token_id": 1, "token_amount": 1.0}]
+    m._repair_gain_per_sale_buy_vs_purchase_caps(gain, sales, {1: 5.0}, {1: 1.0})
+    assert gain[1]["buy_usd"] == 5.0
+
+
+def test_repair_gain_per_sale_buy_vs_purchase_caps_rizzmas_case():
+    """Filet final : coût ~8 $ vs vente ~59 $ alors que Σ achats ≈ 59,5 $ → prorata achats."""
+    sales = [{"sale_id": 1, "token_id": 1, "token_amount": 27_952_342.694}]
+    gain = {1: {"sell_usd": 58.93, "buy_usd": 8.55, "pnl_usd": 50.38}}
+    pc = {1: 59.50}
+    bt = {1: 27_952_342.694}
+    m._repair_gain_per_sale_buy_vs_purchase_caps(gain, sales, pc, bt)
+    assert gain[1]["buy_usd"] > 55.0
+    assert gain[1]["pnl_usd"] < 0.5
+
+
 def test_persisted_hifo_buy_corrupt_detector():
     assert m._persisted_hifo_buy_looks_corrupt_vs_sale(58.93, 8.55)
     assert not m._persisted_hifo_buy_looks_corrupt_vs_sale(58.93, 55.0)

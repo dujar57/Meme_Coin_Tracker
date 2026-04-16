@@ -91,7 +91,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 5
+HIFO_LOGIC_VERSION = 6
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -894,6 +894,10 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                 bu = float(row["buy_usd"]) * factor
                 row["buy_usd"] = round(bu, 4)
                 row["pnl_usd"] = round(float(row["sell_usd"]) - row["buy_usd"], 4)
+
+    _repair_gain_per_sale_buy_vs_purchase_caps(
+        gain_per_sale, sells_chrono, _purchase_cap_usd, _bought_tok
+    )
 
     return gain_per_sale, lots_by_token
 
@@ -6500,6 +6504,44 @@ async def sync_balances_from_chain(wallet_address: str):
         "wallet": wallet_address,
         "on_chain_tokens_found": len(on_chain)
     }
+
+
+def _repair_gain_per_sale_buy_vs_purchase_caps(
+    gain_per_sale: dict,
+    sells_chrono: list,
+    purchase_cap_usd: dict[int, float],
+    bought_tok: dict[int, float],
+) -> None:
+    """
+    Dernier filet : coût HIFO d’une vente très bas vs recettes alors que Σ achats USD (agrégat SQL)
+    est cohérent avec la vente → coût = prorata Σ achats (évite gains mirage type ~8 $ vs ~59 $).
+    Ne s’applique pas si Σ achats est lui-même très bas (ex. vraie lune avec peu dépensé en BDD).
+    """
+    for sale in sells_chrono:
+        sid = sale["sale_id"]
+        row = gain_per_sale.get(sid)
+        if not row or row.get("buy_usd") is None:
+            continue
+        sell_u = float(row["sell_usd"] or 0)
+        buy_u = float(row["buy_usd"] or 0)
+        if sell_u < 12:
+            continue
+        tid = int(sale["token_id"])
+        pc = float(purchase_cap_usd.get(tid, 0.0) or 0.0)
+        bt = float(bought_tok.get(tid, 0.0) or 0.0)
+        ts = float(sale.get("token_amount") or 0)
+        if bt < 1e-9 or ts < 1e-9 or pc < 1e-6:
+            continue
+        if pc + 1e-6 < sell_u * 0.68:
+            continue
+        if buy_u + 1e-6 >= sell_u * 0.30:
+            continue
+        vwap_alloc = pc * (ts / bt)
+        if vwap_alloc + 1e-6 < sell_u * 0.62:
+            continue
+        new_buy = min(vwap_alloc, sell_u * 1.06)
+        row["buy_usd"] = round(new_buy, 4)
+        row["pnl_usd"] = round(sell_u - new_buy, 4)
 
 
 def _persisted_hifo_buy_looks_corrupt_vs_sale(sell_usd: float, buy_usd: Optional[float]) -> bool:
