@@ -621,6 +621,49 @@ def test_hifo_ignores_stale_low_token_cap_when_purchases_match_sale():
     conn.close()
 
 
+def test_hifo_prorata_purchase_when_lots_not_eligible_for_sale():
+    """
+    Si tous les lots sont « après » la vente (timestamps incohérents), le fallback token serait faux ;
+    on doit utiliser le prorata Σ purchases USD / tokens achetés.
+    """
+    wallet = "11111111111111111111111111111112"
+    mint = "TokenMint1111111111111111111111111111111211"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy)
+        VALUES (1, 'RIZZ', ?, ?, 0, 0, 0, 0.1862, 100.0, 100.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 3000000000, 100.0, 0.595, 100.0, '2024-01-01', 'sigfuture')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 0.5893, 100.0, 2000, '2024-06-01', 'sigsale')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    assert pytest.approx(g1["buy_usd"], rel=1e-3) == 59.5
+    assert pytest.approx(g1["sell_usd"], rel=1e-3) == 58.93
+    assert pytest.approx(g1["pnl_usd"], rel=1e-3) == -0.57
+
+    conn.close()
+
+
 def test_repair_duplicate_purchase_rows_merges_sqlite():
     wallet = "33333333333333333333333333333333"
     mint = "TokenMint3333333333333333333333333333333333"

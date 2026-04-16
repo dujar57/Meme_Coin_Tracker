@@ -91,7 +91,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 1
+HIFO_LOGIC_VERSION = 3
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -267,19 +267,25 @@ def _lot_eligible_for_sale(lot_ts_floor: int, lot_slot: int, sale_ts_ceiling: in
 
 
 def _hifo_token_usd_cap_stale_vs_purchases(
-    cap_token_usd: float, cap_purchase_usd: float, sell_usd_total: float
+    cap_token_usd: float,
+    cap_purchase_usd: float,
+    sell_usd_total: float,
+    lot_total_usd: float = 0.0,
 ) -> bool:
     """
-    True si `invested_amount × SOL/USD` sur tokens est trop bas par rapport à Σ purchases et aux
-    ventes (ligne token non resynchronisée). Ne pas l'inclure dans min() — sinon coût HIFO
-    artificiellement bas et « faux » gain (ex. Rizzmas ~18 $ au lieu de ~59 $).
+    True si `invested_amount × SOL/USD` sur tokens est trop bas (ligne token non resynchronisée).
+    Compare aux Σ purchases USD quand dispo, sinon à la somme USD des lots HIFO (même source que
+    les achats) pour le cas où le sous-requête cap achats diverge mais les lots sont corrects.
     """
-    if cap_token_usd <= 1e-9 or cap_purchase_usd <= 1e-9 or sell_usd_total <= 1e-9:
+    if cap_token_usd <= 1e-9 or sell_usd_total <= 1e-9:
+        return False
+    anchor = cap_purchase_usd if cap_purchase_usd > 1e-9 else lot_total_usd
+    if anchor <= 1e-9:
         return False
     return (
         cap_token_usd < sell_usd_total * 0.78
-        and cap_purchase_usd >= sell_usd_total * 0.92
-        and cap_purchase_usd > cap_token_usd * 1.45
+        and anchor >= sell_usd_total * 0.92
+        and anchor > cap_token_usd * 1.45
     )
 
 
@@ -683,7 +689,11 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         if cap_tu <= 1e-12 and _user_cap_usd.get(tid, 0.0) <= 1e-12:
             continue
         # Exclure cap token manifestement obsolète (sinon min() écrase avec ~18 $ vs achats ~59 $).
-        if cap_tu > 1e-12 and _hifo_token_usd_cap_stale_vs_purchases(cap_tu, cap_pu, sell_u):
+        lot_pre_exit = sum(
+            float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0)
+            for l in lots_by_token.get(tid, [])
+        )
+        if cap_tu > 1e-12 and _hifo_token_usd_cap_stale_vs_purchases(cap_tu, cap_pu, sell_u, lot_pre_exit):
             caps_pre = [x for x in caps_pre if abs(x - cap_tu) > 1e-6 * max(cap_tu, 1.0)]
             if not caps_pre:
                 continue
@@ -713,6 +723,9 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
     cap_by_tid: dict[int, float] = {}
     for _tid, _lots in lots_by_token.items():
         tid = int(_tid)
+        lot_total_pre = sum(
+            float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in _lots
+        )
         caps = []
         if _purchase_cap_usd.get(tid, 0.0) > 1e-12:
             caps.append(_purchase_cap_usd[tid])
@@ -720,7 +733,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         if cap_tu > 1e-12:
             _su = _sales_agg.get(tid, (0.0, 0.0))[1]
             if _su <= 1e-6 or not _hifo_token_usd_cap_stale_vs_purchases(
-                cap_tu, _purchase_cap_usd.get(tid, 0.0), _su
+                cap_tu, _purchase_cap_usd.get(tid, 0.0), _su, lot_total_pre
             ):
                 caps.append(cap_tu)
         if _user_cap_usd.get(tid, 0.0) > 1e-12:
@@ -780,13 +793,35 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             lot["remaining"] -= consume
             tokens_left -= consume
 
+        tid_int = int(token_id)
+        cp = _purchase_cap_usd.get(tid_int, 0.0)
+        bt = _bought_tok.get(tid_int, 0.0)
+
         if buy_usd_cost <= 0 and tokens_sold > 0:
-            tok = token_fallback.get(token_id)
-            if tok and (tok.get("purchased_tokens") or 0) > 0:
-                inv = tok.get("invested_amount") or 0
-                rate = tok.get("sol_usd_at_buy") or sol_usd
-                if inv > 0 and rate > 0:
-                    buy_usd_cost = tokens_sold * (inv * rate / tok["purchased_tokens"])
+            if cp > 1e-9 and bt > 1e-9:
+                buy_usd_cost = tokens_sold * (cp / bt)
+            else:
+                tok = token_fallback.get(token_id)
+                if tok and (tok.get("purchased_tokens") or 0) > 0:
+                    inv = tok.get("invested_amount") or 0
+                    rate = tok.get("sol_usd_at_buy") or sol_usd
+                    if inv > 0 and rate > 0:
+                        buy_usd_cost = tokens_sold * (inv * rate / tok["purchased_tokens"])
+
+        if (
+            buy_usd_cost > 0
+            and tokens_sold > 0
+            and sell_usd > 1e-6
+            and cp > 1e-9
+            and bt > 1e-9
+        ):
+            alt = tokens_sold * (cp / bt)
+            if (
+                buy_usd_cost < sell_usd * 0.82
+                and alt > buy_usd_cost * 1.12
+                and alt <= sell_usd * 1.18
+            ):
+                buy_usd_cost = alt
 
         if buy_usd_cost <= 0 and tokens_sold > 0:
             profit = None
