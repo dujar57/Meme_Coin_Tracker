@@ -91,7 +91,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 4
+HIFO_LOGIC_VERSION = 5
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -752,11 +752,17 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         cap = min(caps)
         sold_full, su_tot = _sales_agg.get(tid, (0.0, 0.0))
         btok = _bought_tok.get(tid, 0.0)
+        # Doublons d’import : Σ tokens_bought peut dépasser la position réelle ; comparer la vente
+        # totale à min(Σ achats, Σ vendu) pour ne pas bloquer le plancher « cap min absurde ».
+        if btok > sold_full * 1.02 and sold_full > 1e-9:
+            btok_eff = min(btok, sold_full)
+        else:
+            btok_eff = btok
         lot_anchor = lot_usd_before_cap.get(tid, lot_total_pre)
         if (
             su_tot > 1e-6
-            and btok > 1e-9
-            and sold_full >= btok * 0.97
+            and btok_eff > 1e-9
+            and sold_full >= btok_eff * 0.97
             and cap + 1e-6 < su_tot * 0.18
             and lot_anchor > su_tot * 0.88
         ):
@@ -814,11 +820,15 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         tid_int = int(token_id)
         cp = _purchase_cap_usd.get(tid_int, 0.0)
         bt = _bought_tok.get(tid_int, 0.0)
+        if bt > tokens_sold * 1.02 and tokens_sold > 1e-9:
+            bt_eff = min(bt, tokens_sold)
+        else:
+            bt_eff = bt
         lot_u_anchor = lot_usd_before_cap.get(tid_int, 0.0)
         cp_eff = cp
         if (
-            bt > 1e-9
-            and tokens_sold >= bt * 0.97
+            bt_eff > 1e-9
+            and tokens_sold >= bt_eff * 0.97
             and sell_usd > 1e-6
             and cp > 1e-9
             and cp + 1e-6 < sell_usd * 0.18
@@ -6492,6 +6502,17 @@ async def sync_balances_from_chain(wallet_address: str):
     }
 
 
+def _persisted_hifo_buy_looks_corrupt_vs_sale(sell_usd: float, buy_usd: Optional[float]) -> bool:
+    """Détecte un coût HIFO figé en BDD incohérent (ex. ~8 $ vs vente ~59 $) malgré cache wallet à jour."""
+    if buy_usd is None or sell_usd is None or float(sell_usd) <= 35:
+        return False
+    b = float(buy_usd)
+    s = float(sell_usd)
+    if b <= 0:
+        return False
+    return b + 1e-6 < min(s * 0.16, 12.0)
+
+
 # === TOUTES LES TRANSACTIONS (ACHATS + VENTES) ===
 @app.get("/api/all-transactions")
 async def get_all_transactions(
@@ -6563,7 +6584,19 @@ async def get_all_transactions(
             cw = None
         cache_hit = cw and cw["fingerprint"] == fp
 
-        if skip_hifo and cache_hit:
+        corrupt_persisted_hifo = False
+        hifo_from_db_ok = skip_hifo and cache_hit
+        if hifo_from_db_ok:
+            for s in sells_raw:
+                rate = s.get("sol_usd_at_sale") or sol_usd
+                sell_u = (s.get("sol_amount") or 0) * rate
+                buy = s.get("hifo_buy_cost_usd")
+                if _persisted_hifo_buy_looks_corrupt_vs_sale(sell_u, buy):
+                    corrupt_persisted_hifo = True
+                    hifo_from_db_ok = False
+                    break
+
+        if hifo_from_db_ok:
             for s in sells_raw:
                 sid = s["sale_id"]
                 buy = s.get("hifo_buy_cost_usd")
@@ -6576,8 +6609,14 @@ async def get_all_transactions(
                     "pnl_usd": round(pnl, 4) if pnl is not None else None,
                 }
         else:
-            # skip_hifo=0, ou cache HIFO obsolète (ex. nouveau déploiement sans recalcul POST) : HIFO live
+            # skip_hifo=0, cache obsolète, ou coûts figés incohérents (réparation auto)
             gain_per_sale = _compute_hifo_gain_per_sale(cursor, wallet, sol_usd)
+            if corrupt_persisted_hifo:
+                try:
+                    _persist_wallet_hifo(conn, str(wallet).strip(), sol_usd)
+                    conn.commit()
+                except Exception as ex:
+                    print(f"[!] auto-persist HIFO (vente figée incohérente) wallet {str(wallet)[:10]}…: {ex}")
 
         # ── Construire le résultat final ──────────────────────────────────
         sells = []

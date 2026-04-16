@@ -485,6 +485,61 @@ def test_hifo_cap_uses_user_position_cost_when_purchases_and_token_both_inflated
     conn.close()
 
 
+def test_persisted_hifo_buy_corrupt_detector():
+    assert m._persisted_hifo_buy_looks_corrupt_vs_sale(58.93, 8.55)
+    assert not m._persisted_hifo_buy_looks_corrupt_vs_sale(58.93, 55.0)
+    assert not m._persisted_hifo_buy_looks_corrupt_vs_sale(20.0, 8.0)
+
+
+def test_hifo_cap_floor_when_purchase_rows_inflate_bought_tokens_vs_single_sale():
+    """
+    Σ tokens_bought > quantité vendue (doublons partiels) : le plancher ne doit pas exiger sold >= 97 % de Σ achats.
+    """
+    wallet = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    mint = "TokenMintaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy, user_position_cost_usd)
+        VALUES (1, 'RIZZ', ?, ?, 0, 0, 0, 0.77, 100.0, 100.0, 8.55)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 50.0, 0.2975, 100.0, '2024-01-01', 'sig_a')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (2, 1, ?, 1001, 50.0, 0.2975, 100.0, '2024-01-01', 'sig_b')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 50.0, 0.5893, 100.0, 2000, '2024-01-02', 'sigs_a')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    # Vente 50/100 tokens : coût HIFO ≈ moitié de ~59,5 $ — surtout pas ~4–8 $ (cap min erroné sans plancher).
+    assert 20.0 < g1["buy_usd"] < 35.0
+    assert pytest.approx(g1["sell_usd"], rel=1e-3) == 58.93
+
+    conn.close()
+
+
 def test_hifo_cap_floor_when_min_cap_absurd_vs_sale_and_lots():
     """
     min(purchase, token, user) peut tomber très bas (ex. user_position erroné ~8,55 $) alors que
