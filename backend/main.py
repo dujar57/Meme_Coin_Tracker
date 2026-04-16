@@ -262,6 +262,23 @@ def _lot_eligible_for_sale(lot_ts_floor: int, lot_slot: int, sale_ts_ceiling: in
     return (ltf, lot_slot) <= (stc, sale_slot)
 
 
+def _hifo_token_usd_cap_stale_vs_purchases(
+    cap_token_usd: float, cap_purchase_usd: float, sell_usd_total: float
+) -> bool:
+    """
+    True si `invested_amount × SOL/USD` sur tokens est trop bas par rapport à Σ purchases et aux
+    ventes (ligne token non resynchronisée). Ne pas l'inclure dans min() — sinon coût HIFO
+    artificiellement bas et « faux » gain (ex. Rizzmas ~18 $ au lieu de ~59 $).
+    """
+    if cap_token_usd <= 1e-9 or cap_purchase_usd <= 1e-9 or sell_usd_total <= 1e-9:
+        return False
+    return (
+        cap_token_usd < sell_usd_total * 0.78
+        and cap_purchase_usd >= sell_usd_total * 0.92
+        and cap_purchase_usd > cap_token_usd * 1.45
+    )
+
+
 def _wallet_hifo_fingerprint(cursor, wallet: str) -> str:
     """Empreinte des achats/ventes du wallet — si elle change, le cache HIFO est invalide."""
     cursor.execute(
@@ -661,6 +678,11 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         # Pas de plafond « on-chain » / token : seul Σ purchases — ne pas rabattre sur les ventes.
         if cap_tu <= 1e-12 and _user_cap_usd.get(tid, 0.0) <= 1e-12:
             continue
+        # Exclure cap token manifestement obsolète (sinon min() écrase avec ~18 $ vs achats ~59 $).
+        if cap_tu > 1e-12 and _hifo_token_usd_cap_stale_vs_purchases(cap_tu, cap_pu, sell_u):
+            caps_pre = [x for x in caps_pre if abs(x - cap_tu) > 1e-6 * max(cap_tu, 1.0)]
+            if not caps_pre:
+                continue
         # Le min est déjà celui du token alors que Σ purchases est plus haut : le min() a corrigé.
         if (
             cap_pu > cap_tu * 1.03
@@ -690,8 +712,13 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         caps = []
         if _purchase_cap_usd.get(tid, 0.0) > 1e-12:
             caps.append(_purchase_cap_usd[tid])
-        if _token_cap_usd.get(tid, 0.0) > 1e-12:
-            caps.append(_token_cap_usd[tid])
+        cap_tu = _token_cap_usd.get(tid, 0.0)
+        if cap_tu > 1e-12:
+            _su = _sales_agg.get(tid, (0.0, 0.0))[1]
+            if _su <= 1e-6 or not _hifo_token_usd_cap_stale_vs_purchases(
+                cap_tu, _purchase_cap_usd.get(tid, 0.0), _su
+            ):
+                caps.append(cap_tu)
         if _user_cap_usd.get(tid, 0.0) > 1e-12:
             caps.append(_user_cap_usd[tid])
         if _exit_recon_cap_usd.get(tid, 0.0) > 1e-12:
