@@ -91,7 +91,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 6
+HIFO_LOGIC_VERSION = 7
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -965,36 +965,21 @@ def _hifo_dashboard_gain_loss_net(
     """
     total_gain / total_loss = P/L **latent** (varie avec cours / valorisation), aligné sur les cartes token :
     coût saisi (user_position_cost_usd) ou coût auto achats/ventes si dispo, sinon coût HIFO des lots.
-    realized_* = P/L **figé** sur ventes (HIFO en base ou live).
+    realized_* = P/L **réalisé** = même agrégation que la liste des ventes (HIFO live ci-dessus),
+    pour éviter tout écart avec des `sales.hifo_pnl_usd` figés obsolètes / partiellement recalculés.
     net_total = (ug + rg) − (ul + rl).
     Retourne (total_gain, total_loss, net_total, realized_gain_only, realized_loss_only).
     """
     gain_per_sale, lots_by_token = _hifo_gain_per_sale_and_lots(cursor, wallet, sol_usd)
-    w = (wallet or "").strip()
-    hifo_cache_matches = False
-    if w:
-        try:
-            fp = _wallet_hifo_fingerprint(cursor, w)
-            cw = cursor.execute(
-                "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?", (w,)
-            ).fetchone()
-            hifo_cache_matches = cw is not None and cw["fingerprint"] == fp
-        except sqlite3.OperationalError:
-            hifo_cache_matches = False
-
-    persisted_rg_rl = _hifo_realized_gain_loss_from_persisted_sales(cursor, wallet)
-    if persisted_rg_rl is not None and hifo_cache_matches:
-        rg, rl = persisted_rg_rl
-    else:
-        rg = rl = 0.0
-        for d in gain_per_sale.values():
-            pnl = d.get("pnl_usd")
-            if pnl is None:
-                continue
-            if pnl > 0:
-                rg += pnl
-            else:
-                rl += abs(pnl)
+    rg = rl = 0.0
+    for d in gain_per_sale.values():
+        pnl = d.get("pnl_usd")
+        if pnl is None:
+            continue
+        if pnl > 0:
+            rg += pnl
+        else:
+            rl += abs(pnl)
 
     wf = "AND wallet_address = :wallet"
     cursor.execute(
@@ -2756,13 +2741,13 @@ async def health():
 async def get_dashboard(
     wallet: Optional[str] = Query(None),
     no_cache: bool = Query(False, description="Bypass cache (après Actualiser)"),
-    skip_hifo: bool = Query(False, description="Ne pas simuler HIFO (rapide ; lit le cache BDD si à jour)"),
+    skip_hifo: bool = Query(False, description="Ne pas simuler HIFO (rapide ; hifo_pending selon empreinte cache)"),
 ):
     """
     Dashboard avec cache par wallet.
-    skip_hifo=1 : pas de simulation live pour la liste tx ; cache HIFO pour hifo_pending.
-    Les cartes Gain/Perte **figés** utilisent sales.hifo_pnl_usd dès que chaque vente en a une
-    (figé au recalcul) — plus le cours SOL du jour. Sinon repli sur calcul live.
+    skip_hifo=1 : pas de double simulation HIFO dans ce handler (hifo_pending selon cache).
+    Les cartes **réalisé** (gain/perte figés agrégés) suivent le **même HIFO live** que le calcul
+    des ventes (cohérence), pas les colonnes `sales.hifo_pnl_usd` qui peuvent être obsolètes.
     no_cache=1 pour forcer des données fraîches (SOL, etc.).
     Sans wallet : zéros (ne jamais agréger toute la BDD — la SPA affichait des totaux incohérents).
     """
@@ -6524,7 +6509,7 @@ def _repair_gain_per_sale_buy_vs_purchase_caps(
             continue
         sell_u = float(row["sell_usd"] or 0)
         buy_u = float(row["buy_usd"] or 0)
-        if sell_u < 12:
+        if sell_u < 8:
             continue
         tid = int(sale["token_id"])
         pc = float(purchase_cap_usd.get(tid, 0.0) or 0.0)
@@ -6560,12 +6545,12 @@ def _persisted_hifo_buy_looks_corrupt_vs_sale(sell_usd: float, buy_usd: Optional
 async def get_all_transactions(
     wallet: Optional[str] = Query(None),
     limit: Optional[int] = Query(None, ge=10, le=500),
-    skip_hifo: bool = Query(False, description="Ne pas recalculer HIFO en live (lit hifo_* en BDD si cache valide)"),
+    skip_hifo: bool = Query(False, description="Conservé pour compatibilité ; le PnL HIFO est toujours recalculé ici."),
 ):
     """
     Retourne tous les achats et toutes les ventes triés par date décroissante.
-    skip_hifo=0 : simulation HIFO complète. skip_hifo=1 : PnL par vente depuis la BDD si le cache
-    wallet est à jour (même empreinte que les achats/ventes), sinon champs PnL vides.
+    Le PnL / coût HIFO par vente est **toujours** recalculé (même logique que le dashboard) pour éviter
+    tout décalage avec des `sales.hifo_*` figés obsolètes.
     """
     try:
         sol_usd = await _get_sol_usd_price()
@@ -6574,6 +6559,8 @@ async def get_all_transactions(
 
     if wallet is None or not str(wallet).strip():
         return []
+
+    _ = skip_hifo  # conservé pour compatibilité des URLs / frontend
 
     with get_db() as conn:
         cursor = conn.cursor()
@@ -6616,49 +6603,7 @@ async def get_all_transactions(
         """, params)
         buys = [dict(r) for r in cursor.fetchall()]
 
-        gain_per_sale = {}
-        fp = _wallet_hifo_fingerprint(cursor, wallet)
-        try:
-            cw = cursor.execute(
-                "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?", (wallet,)
-            ).fetchone()
-        except sqlite3.OperationalError:
-            cw = None
-        cache_hit = cw and cw["fingerprint"] == fp
-
-        corrupt_persisted_hifo = False
-        hifo_from_db_ok = skip_hifo and cache_hit
-        if hifo_from_db_ok:
-            for s in sells_raw:
-                rate = s.get("sol_usd_at_sale") or sol_usd
-                sell_u = (s.get("sol_amount") or 0) * rate
-                buy = s.get("hifo_buy_cost_usd")
-                if _persisted_hifo_buy_looks_corrupt_vs_sale(sell_u, buy):
-                    corrupt_persisted_hifo = True
-                    hifo_from_db_ok = False
-                    break
-
-        if hifo_from_db_ok:
-            for s in sells_raw:
-                sid = s["sale_id"]
-                buy = s.get("hifo_buy_cost_usd")
-                pnl = s.get("hifo_pnl_usd")
-                rate = s.get("sol_usd_at_sale") or sol_usd
-                sell_usd = (s.get("sol_amount") or 0) * rate
-                gain_per_sale[sid] = {
-                    "sell_usd": round(sell_usd, 4),
-                    "buy_usd": round(buy, 4) if buy is not None else None,
-                    "pnl_usd": round(pnl, 4) if pnl is not None else None,
-                }
-        else:
-            # skip_hifo=0, cache obsolète, ou coûts figés incohérents (réparation auto)
-            gain_per_sale = _compute_hifo_gain_per_sale(cursor, wallet, sol_usd)
-            if corrupt_persisted_hifo:
-                try:
-                    _persist_wallet_hifo(conn, str(wallet).strip(), sol_usd)
-                    conn.commit()
-                except Exception as ex:
-                    print(f"[!] auto-persist HIFO (vente figée incohérente) wallet {str(wallet)[:10]}…: {ex}")
+        gain_per_sale = _compute_hifo_gain_per_sale(cursor, wallet, sol_usd)
 
         # ── Construire le résultat final ──────────────────────────────────
         sells = []

@@ -119,7 +119,7 @@ def test_dashboard_totals_are_latent_only_excludes_realized():
 
 
 def test_realized_fige_stable_when_hifo_persisted_on_sales():
-    """Gain figé = somme des hifo_pnl_usd : ne doit pas bouger si le cours SOL de la requête change."""
+    """Réalisé dashboard = HIFO live (cohérent avec les tx) ; stable si le cours SOL requête change car les lignes ont leurs taux."""
     wallet = "33333333333333333333333333333333"
     mint = "TokenMint3333333333333333333333333333333333"
     conn = sqlite3.connect(":memory:")
@@ -174,6 +174,65 @@ def test_realized_fige_stable_when_hifo_persisted_on_sales():
     assert pytest.approx(rg100, rel=1e-6) == 50.0
     assert pytest.approx(rg999, rel=1e-6) == 50.0
     assert rl100 == rl999 == 0.0
+
+    conn.close()
+
+
+def test_dashboard_realized_matches_live_not_stale_sales_columns():
+    """Colonnes sales.hifo_* fausses + cache OK : le dashboard doit suivre le HIFO live (somme des ventes)."""
+    wallet = "cccccccccccccccccccccccccccccccc"
+    mint = "TokenMintccccccccccccccccccccccccccccccccccccccc"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute("ALTER TABLE sales ADD COLUMN hifo_pnl_usd REAL")
+    c.execute("ALTER TABLE sales ADD COLUMN hifo_buy_cost_usd REAL")
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 50, 100.0, 2.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date)
+        VALUES (1, 1, ?, 1000, 100, 1.0, 100.0, '2024-01-01')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date)
+        VALUES (1, 1, 50, 1.0, 100.0, 2000, '2024-01-02')
+        """,
+    )
+    c.execute(
+        "UPDATE sales SET hifo_pnl_usd = 9999, hifo_buy_cost_usd = 1 WHERE id = 1"
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wallet_hifo_cache (
+            wallet_address TEXT PRIMARY KEY,
+            realized_gain REAL NOT NULL DEFAULT 0,
+            realized_loss REAL NOT NULL DEFAULT 0,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    fp = m._wallet_hifo_fingerprint(c, wallet)
+    c.execute(
+        "INSERT INTO wallet_hifo_cache (wallet_address, realized_gain, realized_loss, fingerprint) VALUES (?, 9999, 0, ?)",
+        (wallet, fp),
+    )
+    conn.commit()
+
+    _, _, _, rg, rl = m._hifo_dashboard_gain_loss_net(c, wallet, 100.0)
+    assert rg < 100.0, "ne doit pas prendre le hifo_pnl_usd=9999 en base"
+    assert pytest.approx(rg, rel=1e-6) == 50.0
+    assert rl == 0.0
 
     conn.close()
 
