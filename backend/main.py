@@ -93,7 +93,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 8
+HIFO_LOGIC_VERSION = 9
 
 # --- HIFO : ce que le code garantit (réalité = données BDD achats/ventes + ces règles) ---
 # 1. Source unique du P/L par vente : _hifo_gain_per_sale_and_lots → _compute_hifo_gain_per_sale.
@@ -106,6 +106,8 @@ HIFO_LOGIC_VERSION = 8
 #    par signature sans dérive (objectif long terme : qualité des imports).
 # 5. GET /api/initial-load active un cache de requête (contextvar) : une seule exécution de
 #    _hifo_gain_per_sale_and_lots par (wallet, SOL/USD arrondi) pour dashboard + tokens + tx.
+# 6. Repair VWAP : si prorata Σ achats > 112 % des recettes de la vente, on n’applique pas le filet
+#    (évite « pertes » fictives quand Σ achats BDD est gonflé vs le prix de cession).
 
 _hifo_initial_load_bundle: contextvars.ContextVar[dict[tuple[str, float], tuple[dict, dict]] | None] = (
     contextvars.ContextVar("_hifo_initial_load_bundle", default=None)
@@ -6548,6 +6550,10 @@ def _repair_gain_per_sale_buy_vs_purchase_caps(
         # Prorata Σ achats / Σ tokens peut inclure des achats postérieurs à cette vente →
         # si >> recettes de la vente, ne pas « corriger » (évite faux coûts sur vieilles ventes).
         if vwap_alloc > sell_u * 1.28 + 1e-6:
+            continue
+        # Σ achats gonflé (doublons) : ne pas ramener le coût au-dessus des recettes + marge raisonnable,
+        # sinon on « invente » une grosse perte (ex. vwap 110 $ pour une vente à 100 $).
+        if vwap_alloc > sell_u * 1.12 + 1e-6:
             continue
         if buy_u + 1e-6 >= vwap_alloc * 0.88:
             continue
