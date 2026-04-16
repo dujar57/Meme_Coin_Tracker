@@ -406,6 +406,56 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                 }
             )
 
+    # Si Σ(coût USD des lots) dépasse le plafond « dépensé réel », les lots ont divergé (doublon
+    # d’import, dérive vs `tokens`, etc.). Plafond = min(Σ purchases, invested×SOL/USD du token)
+    # quand les deux sont disponibles — le plus conservateur évite un coût HIFO > ce que tu as payé.
+    cursor.execute(
+        """
+        SELECT p.token_id,
+               COALESCE(SUM(p.sol_spent * COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?)), 0) AS capu
+        FROM purchases p
+        INNER JOIN tokens t ON p.token_id = t.id
+        WHERE t.wallet_address = ? AND p.tokens_bought > 0 AND p.sol_spent > 0
+        GROUP BY p.token_id
+        """,
+        (sol_usd, wallet),
+    )
+    _purchase_cap_usd = {int(r["token_id"]): float(r["capu"] or 0) for r in cursor.fetchall()}
+    cursor.execute(
+        """
+        SELECT id,
+               COALESCE(invested_amount, 0) * COALESCE(NULLIF(sol_usd_at_buy, 0), ?) AS tok_usd
+        FROM tokens
+        WHERE wallet_address = ?
+        """,
+        (sol_usd, wallet),
+    )
+    _token_cap_usd = {int(r["id"]): float(r["tok_usd"] or 0) for r in cursor.fetchall()}
+    for _tid, _lots in lots_by_token.items():
+        tid = int(_tid)
+        cap_p = _purchase_cap_usd.get(tid, 0.0)
+        cap_t = _token_cap_usd.get(tid, 0.0)
+        if cap_p > 1e-12 and cap_t > 1e-12:
+            cap = min(cap_p, cap_t)
+        elif cap_p > 1e-12:
+            cap = cap_p
+        elif cap_t > 1e-12:
+            cap = cap_t
+        else:
+            continue
+        lot_total = sum(
+            float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in _lots
+        )
+        if lot_total <= cap * (1.0 + 1e-9):
+            continue
+        factor = cap / lot_total if lot_total > 0 else 1.0
+        for l in _lots:
+            l["sol_spent"] = float(l.get("sol_spent") or 0) * factor
+            tb = float(l.get("tokens_total") or 0)
+            l["price_usd"] = (
+                (l["sol_spent"] / tb) * float(l.get("sol_rate_buy") or 0) if tb > 0 else 0.0
+            )
+
     token_ids_sold = list({s["token_id"] for s in sells_raw})
     token_fallback = {}
     if token_ids_sold:

@@ -378,3 +378,48 @@ def test_hifo_counts_purchase_when_purchase_row_wallet_is_null():
     assert pytest.approx(g1["pnl_usd"], rel=1e-6) == -5.0
 
     conn.close()
+
+
+def test_hifo_lots_scaled_when_purchases_exceed_token_invested_usd():
+    """
+    Plafond min(Σ purchases USD, invested×SOL/USD sur tokens) : si la ligne token est plus basse
+    (dérive / resync), le coût HIFO ne doit pas dépasser ce plafond.
+    """
+    wallet = "88888888888888888888888888888888"
+    mint = "TokenMint8888888888888888888888888888888888"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy)
+        VALUES (1, 'MEME', ?, ?, 0, 0, 0, 0.5, 100.0, 100.0)
+        """,
+        (mint, wallet),
+    )
+    # Achats en BDD : 1 SOL dépensé × 100 = 100 USD (incohérent avec tokens.invested_amount = 0.5 SOL)
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 100.0, 1.0, 100.0, '2024-01-01', 'sigb8')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 0.4, 100.0, 2000, '2024-01-02', 'sigs8')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    # min(100, 0.5*100) = 50 USD de coût max ; vente 0.4 SOL × 100 = 40 USD → P/L = -10
+    assert pytest.approx(g1["buy_usd"], rel=1e-6) == 50.0
+    assert pytest.approx(g1["sell_usd"], rel=1e-6) == 40.0
+    assert pytest.approx(g1["pnl_usd"], rel=1e-6) == -10.0
+
+    conn.close()
