@@ -151,6 +151,22 @@ def test_realized_fige_stable_when_hifo_persisted_on_sales():
     c.execute(
         "UPDATE sales SET hifo_pnl_usd = 50, hifo_buy_cost_usd = 50 WHERE id = 1"
     )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wallet_hifo_cache (
+            wallet_address TEXT PRIMARY KEY,
+            realized_gain REAL NOT NULL DEFAULT 0,
+            realized_loss REAL NOT NULL DEFAULT 0,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    fp = m._wallet_hifo_fingerprint(c, wallet)
+    c.execute(
+        "INSERT INTO wallet_hifo_cache (wallet_address, realized_gain, realized_loss, fingerprint) VALUES (?, 50, 0, ?)",
+        (wallet, fp),
+    )
     conn.commit()
 
     _, _, _, rg100, rl100 = m._hifo_dashboard_gain_loss_net(c, wallet, 100.0)

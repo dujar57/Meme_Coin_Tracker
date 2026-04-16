@@ -89,6 +89,10 @@ def _jupiter_parse_prices_json(payload: dict, mints: List[str]) -> dict[str, flo
 # Tokens à ignorer : vide = tout tracer (USDC, USDT, mSOL, meme coins, etc.)
 BLACKLISTED_MINTS: set[str] = set()
 
+# Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
+# valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
+HIFO_LOGIC_VERSION = 1
+
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
 
@@ -294,7 +298,7 @@ def _wallet_hifo_fingerprint(cursor, wallet: str) -> str:
         (wallet, wallet, wallet, wallet, wallet, wallet),
     )
     r = cursor.fetchone()
-    return ":".join(str(x if x is not None else 0) for x in r)
+    return ":".join(str(x if x is not None else 0) for x in r) + f":v{HIFO_LOGIC_VERSION}"
 
 
 def _invalidate_wallet_hifo_cache(conn, wallet_address: str):
@@ -888,8 +892,20 @@ def _hifo_dashboard_gain_loss_net(
     Retourne (total_gain, total_loss, net_total, realized_gain_only, realized_loss_only).
     """
     gain_per_sale, lots_by_token = _hifo_gain_per_sale_and_lots(cursor, wallet, sol_usd)
+    w = (wallet or "").strip()
+    hifo_cache_matches = False
+    if w:
+        try:
+            fp = _wallet_hifo_fingerprint(cursor, w)
+            cw = cursor.execute(
+                "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?", (w,)
+            ).fetchone()
+            hifo_cache_matches = cw is not None and cw["fingerprint"] == fp
+        except sqlite3.OperationalError:
+            hifo_cache_matches = False
+
     persisted_rg_rl = _hifo_realized_gain_loss_from_persisted_sales(cursor, wallet)
-    if persisted_rg_rl is not None:
+    if persisted_rg_rl is not None and hifo_cache_matches:
         rg, rl = persisted_rg_rl
     else:
         rg = rl = 0.0
@@ -2787,11 +2803,14 @@ async def get_dashboard(
             )
             if skip_hifo:
                 fp = _wallet_hifo_fingerprint(cursor, wallet)
-                cursor.execute(
-                    "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?",
-                    (wallet,),
-                )
-                wh = cursor.fetchone()
+                try:
+                    cursor.execute(
+                        "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?",
+                        (wallet,),
+                    )
+                    wh = cursor.fetchone()
+                except sqlite3.OperationalError:
+                    wh = None
                 hifo_pending = (not wh) or (wh["fingerprint"] != fp)
             else:
                 hifo_pending = False
@@ -6472,9 +6491,12 @@ async def get_all_transactions(
 
         gain_per_sale = {}
         fp = _wallet_hifo_fingerprint(cursor, wallet)
-        cw = cursor.execute(
-            "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?", (wallet,)
-        ).fetchone()
+        try:
+            cw = cursor.execute(
+                "SELECT fingerprint FROM wallet_hifo_cache WHERE wallet_address = ?", (wallet,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            cw = None
         cache_hit = cw and cw["fingerprint"] == fp
 
         if skip_hifo and cache_hit:
@@ -6489,7 +6511,8 @@ async def get_all_transactions(
                     "buy_usd": round(buy, 4) if buy is not None else None,
                     "pnl_usd": round(pnl, 4) if pnl is not None else None,
                 }
-        elif not skip_hifo:
+        else:
+            # skip_hifo=0, ou cache HIFO obsolète (ex. nouveau déploiement sans recalcul POST) : HIFO live
             gain_per_sale = _compute_hifo_gain_per_sale(cursor, wallet, sol_usd)
 
         # ── Construire le résultat final ──────────────────────────────────
