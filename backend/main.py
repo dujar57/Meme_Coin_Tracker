@@ -93,6 +93,16 @@ BLACKLISTED_MINTS: set[str] = set()
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
 HIFO_LOGIC_VERSION = 8
 
+# --- HIFO : ce que le code garantit (réalité = données BDD achats/ventes + ces règles) ---
+# 1. Source unique du P/L par vente : _hifo_gain_per_sale_and_lots → _compute_hifo_gain_per_sale.
+# 2. Dashboard realized_gain / realized_loss et GET /api/all-transactions utilisent ce même calcul live
+#    (pas les colonnes sales.hifo_* pour l’affichage — elles peuvent être obsolètes).
+# 3. sales.hifo_* et wallet_hifo_cache sont mis à jour par « Recalculer HIFO » / _persist_wallet_hifo
+#    (export, cohérence BDD) ; l’UI ne s’y fie pas pour les totaux ni le tableau des tx.
+# 4. Filets (plafonds token/user/Σ achats, plancher cap, repair prorata Σ achats) compensent imports
+#    dupliqués, caps aberrants ou min() trop bas ; un historique chain-grade exact exigerait des lots
+#    par signature sans dérive (objectif long terme : qualité des imports).
+
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
 
@@ -919,44 +929,6 @@ def _hifo_remaining_cost_usd(lots_by_token: dict, token_id: int) -> float:
             continue
         s += (rem / tot) * float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0)
     return s
-
-
-def _hifo_realized_gain_loss_from_persisted_sales(cursor, wallet: str) -> tuple[float, float] | None:
-    """
-    Gains / pertes **figés** : somme des sales.hifo_pnl_usd (écrits au recalcul HIFO).
-    Ne dépend pas du cours SOL actuel. Retourne None si la colonne n'existe pas ou si au moins
-    une vente du wallet n'a pas encore de hifo_pnl_usd — dans ce cas le dashboard retombe sur
-    le calcul live (sensible au SOL spot pour les taux manquants).
-    """
-    w = (wallet or "").strip()
-    if not w:
-        return (0.0, 0.0)
-    try:
-        cursor.execute(
-            """
-            SELECT s.hifo_pnl_usd AS pnl
-            FROM sales s
-            JOIN tokens t ON s.token_id = t.id
-            WHERE t.wallet_address = ?
-            """,
-            (w,),
-        )
-    except sqlite3.OperationalError:
-        return None
-    rows = cursor.fetchall()
-    if not rows:
-        return (0.0, 0.0)
-    rg = rl = 0.0
-    for r in rows:
-        pnl = r["pnl"]
-        if pnl is None:
-            return None
-        pnl = float(pnl)
-        if pnl > 0:
-            rg += pnl
-        elif pnl < 0:
-            rl += abs(pnl)
-    return (rg, rl)
 
 
 def _hifo_dashboard_gain_loss_net(

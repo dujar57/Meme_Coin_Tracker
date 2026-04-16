@@ -118,6 +118,53 @@ def test_dashboard_totals_are_latent_only_excludes_realized():
     conn.close()
 
 
+def test_invariant_dashboard_realized_equals_sum_gain_per_sale():
+    """Le dashboard agrège exactement les mêmes pnl_usd que _compute_hifo_gain_per_sale (une seule pipeline)."""
+    wallet = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    mint = "TokenMinteeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 50, 100.0, 2.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date)
+        VALUES (1, 1, ?, 1000, 100, 1.0, 100.0, '2024-01-01')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date)
+        VALUES (1, 1, 50, 1.0, 100.0, 2000, '2024-01-02')
+        """,
+    )
+    conn.commit()
+    sol_usd = 100.0
+    gain = m._compute_hifo_gain_per_sale(c, wallet, sol_usd)
+    rg_sum = sum(
+        float(x["pnl_usd"])
+        for x in gain.values()
+        if x.get("pnl_usd") is not None and float(x["pnl_usd"]) > 0
+    )
+    rl_sum = sum(
+        abs(float(x["pnl_usd"]))
+        for x in gain.values()
+        if x.get("pnl_usd") is not None and float(x["pnl_usd"]) < 0
+    )
+    _, _, _, rg, rl = m._hifo_dashboard_gain_loss_net(c, wallet, sol_usd)
+    assert pytest.approx(rg, rel=1e-6) == rg_sum
+    assert pytest.approx(rl, rel=1e-6) == rl_sum
+    conn.close()
+
+
 def test_realized_fige_stable_when_hifo_persisted_on_sales():
     """Réalisé dashboard = HIFO live (cohérent avec les tx) ; stable si le cours SOL requête change car les lignes ont leurs taux."""
     wallet = "33333333333333333333333333333333"
