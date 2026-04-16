@@ -1,0 +1,372 @@
+/**
+ * UI « wallet » mobile uniquement (≤639px, aligné sur breakpoint Tailwind sm).
+ * Inspiré Phantom / Zerion / Jupiter : fond sombre, surfaces nettes, typo claire.
+ * Chargé avec media="(max-width: 639px)" — le bureau n’applique pas cette feuille.
+ */
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap");
+
+:root {
+  --mw-bg0: #07060a;
+  --mw-bg1: #0e0c14;
+  --mw-surface: rgba(22, 20, 32, 0.94);
+  --mw-surface2: rgba(30, 28, 44, 0.88);
+  --mw-border: rgba(255, 255, 255, 0.08);
+  --mw-border2: rgba(171, 159, 242, 0.22);
+  --mw-text: #eceaf4;
+  --mw-muted: #9892ac;
+  --mw-muted2: #6d6785;
+  --mw-accent: #c4b5fd;
+  --mw-mint: #5eead4;
+  --mw-mint2: #2dd4bf;
+  --mw-danger: #fb7185;
+  --mw-success: #4ade80;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif !important;
+  background: var(--mw-bg0) !important;
+  background-image: radial-gradient(ellipse 100% 60% at 50% -15%, rgba(171, 159, 242, 0.18), transparent 55%),
+    radial-gradient(ellipse 80% 50% at 100% 0%, rgba(45, 212, 191, 0.08), transparent 45%),
+    linear-gradient(165deg, var(--mw-bg0) 0%, var(--mw-bg1) 45%, #060d18 100%) !important;
+  color: var(--mw-text);
+}
+
+#app {
+  padding-left: max(0.75rem, env(safe-area-inset-left)) !important;
+  padding-right: max(0.75rem, env(safe-area-inset-right)) !important;
+  padding-bottom: max(1rem, env(safe-area-inset-bottom)) !important;
+}
+
+/* Surfaces « glass » → cartes type app wallet */
+#app .glass,
+#addresses-page .glass,
+#welcome-page .glass {
+  background: var(--mw-surface) !important;
+  border: 1px solid var(--mw-border) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
+  backdrop-filter: blur(18px) saturate(140%) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(140%) !important;
+}
+
+#app > header.glass.header-gradient {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  border-radius: 1.15rem !important;
+  background: linear-gradient(145deg, rgba(26, 24, 38, 0.98) 0%, rgba(16, 14, 26, 0.98) 55%, rgba(10, 18, 32, 0.96) 100%) !important;
+  border: 1px solid var(--mw-border2) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(94, 234, 212, 0.06) inset !important;
+}
+
+#app > header h1,
+#app > header .text-white {
+  color: #faf8ff !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+#app > header [class*="text-cyan-100"] {
+  color: var(--mw-muted) !important;
+}
+
+#auth-bar {
+  background: rgba(12, 11, 20, 0.75) !important;
+  border-color: var(--mw-border) !important;
+}
+
+#wallet-section input,
+#wallet-section select,
+#wallet-input,
+#saved-wallets-select {
+  background: rgba(10, 9, 16, 0.85) !important;
+  border-color: rgba(171, 159, 242, 0.35) !important;
+  color: var(--mw-text) !important;
+  border-radius: 0.95rem !important;
+}
+
+#wallet-section input::placeholder {
+  color: var(--mw-muted2);
+}
+
+/* Boutons principaux type Jupiter / Phantom */
+#app .btn-teal {
+  background: linear-gradient(135deg, #5eead4 0%, #14b8a6 55%, #0d9488 100%) !important;
+  color: #041015 !important;
+  font-weight: 700 !important;
+  border: none !important;
+  box-shadow: 0 4px 18px rgba(45, 212, 191, 0.35) !important;
+}
+
+#app .btn-mint {
+  background: linear-gradient(135deg, #34d399, #059669) !important;
+  color: #04120a !important;
+  font-weight: 700 !important;
+}
+
+#app #refresh-prices {
+  background: linear-gradient(135deg, #38bdf8, #0284c7) !important;
+  color: #fff !important;
+}
+
+#app #recalculate-history {
+  background: linear-gradient(135deg, #a78bfa, #7c3aed) !important;
+  color: #fff !important;
+}
+
+#app > header .grid button,
+#app > header button[class*="min-h"] {
+  min-height: 48px !important;
+  border-radius: 0.95rem !important;
+}
+
+#wallet-info .bg-cyan-800 {
+  background: rgba(20, 18, 32, 0.95) !important;
+  border-color: var(--mw-border2) !important;
+}
+
+/* Typo & couleurs de texte (cartes dashboard, welcome, adresses) */
+#app .text-teal-900,
+#app .text-teal-800,
+#addresses-page .text-teal-900,
+#addresses-page .text-teal-800 {
+  color: var(--mw-text) !important;
+}
+
+#app .text-teal-700,
+#addresses-page .text-teal-700 {
+  color: #d4d0e8 !important;
+}
+
+#app .text-teal-600,
+#addresses-page .text-teal-600 {
+  color: var(--mw-muted) !important;
+}
+
+#app .text-teal-500 {
+  color: var(--mw-mint) !important;
+}
+
+#app .text-cyan-800,
+#app .text-cyan-900 {
+  color: var(--mw-text) !important;
+}
+
+#app .text-gray-700,
+#addresses-page .text-gray-700 {
+  color: #c4c0d8 !important;
+}
+
+#app .text-gray-600,
+#addresses-page .text-gray-600 {
+  color: var(--mw-muted) !important;
+}
+
+#app .text-gray-500,
+#addresses-page .text-gray-500 {
+  color: var(--mw-muted2) !important;
+}
+
+#app .text-gray-400 {
+  color: #7d7894 !important;
+}
+
+#app .text-emerald-700,
+#app .text-emerald-600 {
+  color: var(--mw-success) !important;
+}
+
+#app .text-rose-700,
+#app .text-rose-600 {
+  color: var(--mw-danger) !important;
+}
+
+#app .border-teal-100,
+#app .border-teal-200,
+#app .border-cyan-200,
+#addresses-page .border-teal-200 {
+  border-color: var(--mw-border) !important;
+}
+
+#app .bg-white\/80,
+#app .bg-white\/60,
+#app .bg-white\/40,
+#app .bg-white\/30 {
+  background: var(--mw-surface2) !important;
+}
+
+#app .bg-white,
+#addresses-page .bg-white\/40 {
+  background: rgba(18, 16, 28, 0.92) !important;
+  color: var(--mw-text);
+}
+
+#app .bg-teal-50,
+#addresses-page .bg-teal-50 {
+  background: rgba(36, 32, 52, 0.65) !important;
+}
+
+#app .bg-teal-50\/80,
+#app tr.hover\:bg-indigo-50:hover {
+  background: rgba(45, 40, 68, 0.5) !important;
+}
+
+#app thead.bg-teal-50,
+#addresses-page thead.bg-teal-50 {
+  background: rgba(30, 27, 48, 0.95) !important;
+  color: var(--mw-text) !important;
+}
+
+#app .table-header-teal {
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.5), rgba(45, 212, 191, 0.35)) !important;
+  color: #fff !important;
+}
+
+/* Hero dashboard & cartes chiffres */
+#app .dash-hero-card {
+  background: linear-gradient(145deg, rgba(32, 28, 48, 0.98) 0%, rgba(20, 18, 34, 0.96) 100%) !important;
+  border: 1px solid var(--mw-border2) !important;
+}
+
+#dashboard .glass.rounded-2xl,
+#dashboard-mobile-hero .glass.rounded-2xl,
+#dashboard-mobile-rest .glass.rounded-2xl {
+  border-radius: 1.1rem !important;
+}
+
+#tokens-grid .glass.rounded-2xl {
+  border-radius: 1.15rem !important;
+  border: 1px solid var(--mw-border) !important;
+}
+
+/* Liens */
+#app a.text-teal-500,
+#app a.text-teal-600 {
+  color: var(--mw-mint2) !important;
+}
+
+/* Graphiques section */
+#charts-section {
+  background: var(--mw-surface2) !important;
+  border: 1px solid var(--mw-border) !important;
+  border-radius: 1.1rem !important;
+}
+
+/* Welcome page */
+#welcome-page .bg-white\/60 {
+  background: var(--mw-surface2) !important;
+}
+
+#welcome-page .text-teal-800,
+#welcome-page .text-teal-700,
+#welcome-page .text-teal-600,
+#welcome-page .text-teal-500 {
+  color: var(--mw-text) !important;
+}
+
+#welcome-page .text-teal-500.font-medium {
+  color: var(--mw-muted) !important;
+}
+
+/* Overlay premier chargement — cohérent wallet */
+#first-load-overlay {
+  background: linear-gradient(165deg, #06040a 0%, #0f0a18 50%, #051a1f 100%) !important;
+}
+
+/* Barre de chargement globale */
+#global-loading-bar {
+  background: rgba(12, 10, 18, 0.9) !important;
+}
+
+#global-loading-bar-fill {
+  background: linear-gradient(90deg, #5eead4, #a78bfa, #5eead4) !important;
+}
+
+/* Focus accessibles */
+#app input:focus,
+#app textarea:focus,
+#app select:focus {
+  border-color: var(--mw-mint2) !important;
+  box-shadow: 0 0 0 3px rgba(94, 234, 212, 0.25) !important;
+}
+
+/* Cartes token : léger lift */
+#tokens-grid .glass.rounded-2xl.card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+#tokens-grid .glass.rounded-2xl.card-hover:active {
+  transform: scale(0.99);
+}
+
+/* Modales plein écran (téléphone : sheet depuis le bas) */
+#dashboard-tx-modal,
+#token-chart-modal,
+#token-modal,
+#token-tx-modal,
+#reference-capital-modal {
+  background: rgba(4, 3, 10, 0.88) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+}
+
+#dashboard-tx-modal [class*="border-teal"],
+#dashboard-tx-modal [class*="bg-white"],
+#token-tx-modal [class*="bg-white"],
+#reference-capital-modal [class*="bg-white"] {
+  background: rgba(16, 14, 26, 0.75) !important;
+  border-color: var(--mw-border) !important;
+}
+
+#dashboard-tx-modal thead[class*="bg-white"],
+#token-tx-modal thead[class*="bg-white"] {
+  background: rgba(22, 20, 34, 0.95) !important;
+}
+
+#dashboard-tx-modal .text-gray-600,
+#token-tx-modal .text-gray-500 {
+  color: var(--mw-muted) !important;
+}
+
+#token-modal input,
+#token-modal select,
+#token-modal textarea,
+#reference-capital-modal input {
+  background: rgba(10, 9, 16, 0.9) !important;
+  border-color: rgba(171, 159, 242, 0.3) !important;
+  color: var(--mw-text) !important;
+}
+
+#reference-capital-modal .bg-sky-100 {
+  background: rgba(56, 189, 248, 0.2) !important;
+  color: #e0f2fe !important;
+}
+
+#reference-capital-modal .bg-slate-200 {
+  background: rgba(51, 47, 68, 0.9) !important;
+  color: var(--mw-text) !important;
+}
+
+#app .bg-cyan-700,
+#app .bg-cyan-800,
+#app .bg-teal-700,
+#app .bg-violet-700 {
+  filter: saturate(1.05);
+}
+
+#app .bg-rose-500 {
+  box-shadow: 0 2px 12px rgba(251, 113, 133, 0.35);
+}
+
+/* Texte slate dans modales */
+#app .text-slate-500,
+#token-chart-modal .text-slate-500 {
+  color: var(--mw-muted2) !important;
+}
+
+#app .text-teal-400 {
+  color: var(--mw-mint) !important;
+}
