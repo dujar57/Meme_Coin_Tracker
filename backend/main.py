@@ -19,6 +19,8 @@ import csv
 import io
 from contextlib import contextmanager
 from collections import defaultdict
+import contextvars
+import copy
 from dotenv import load_dotenv
 
 from config import (
@@ -102,6 +104,12 @@ HIFO_LOGIC_VERSION = 8
 # 4. Filets (plafonds token/user/Σ achats, plancher cap, repair prorata Σ achats) compensent imports
 #    dupliqués, caps aberrants ou min() trop bas ; un historique chain-grade exact exigerait des lots
 #    par signature sans dérive (objectif long terme : qualité des imports).
+# 5. GET /api/initial-load active un cache de requête (contextvar) : une seule exécution de
+#    _hifo_gain_per_sale_and_lots par (wallet, SOL/USD arrondi) pour dashboard + tokens + tx.
+
+_hifo_initial_load_bundle: contextvars.ContextVar[dict[tuple[str, float], tuple[dict, dict]] | None] = (
+    contextvars.ContextVar("_hifo_initial_load_bundle", default=None)
+)
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -501,6 +509,15 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
     lots_by_token : token_id -> list de lots { remaining, tokens_total, sol_spent, sol_rate_buy, ... }.
     """
     from collections import defaultdict
+
+    wkey = (wallet or "").strip()
+    sol_key = round(float(sol_usd or 0.0), 2)
+    bundle = _hifo_initial_load_bundle.get()
+    if bundle is not None and wkey:
+        ck = (wkey, sol_key)
+        if ck in bundle:
+            g0, l0 = bundle[ck]
+            return copy.deepcopy(g0), copy.deepcopy(l0)
 
     wallet_filter = "AND t.wallet_address = ?"
     params = (wallet,)
@@ -908,6 +925,9 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
     _repair_gain_per_sale_buy_vs_purchase_caps(
         gain_per_sale, sells_chrono, _purchase_cap_usd, _bought_tok
     )
+
+    if bundle is not None and wkey:
+        bundle[(wkey, sol_key)] = (gain_per_sale, lots_by_token)
 
     return gain_per_sale, lots_by_token
 
@@ -2923,9 +2943,38 @@ async def initial_load(
     no_cache: bool = Query(False, description="Bypass cache dashboard (après Actualiser)"),
     skip_hifo: bool = Query(False, description="Pas de HIFO sur dashboard + liste tx (rapide)"),
 ):
-    """Retourne dashboard + tokens + transactions. skip_txs=1 sans liste tx ; skip_hifo=1 sans simulation HIFO."""
+    """
+    Retourne dashboard + tokens + transactions. skip_txs=1 sans liste tx ; skip_hifo=1 sans simulation HIFO.
+    Avec wallet valide : un cache de requête partage un seul calcul HIFO entre les trois appels internes.
+    """
     if no_cache and wallet:
         _invalidate_dashboard_cache(wallet)
+    wn = (wallet or "").strip()
+    if wn and len(wn) >= 20:
+        tok = _hifo_initial_load_bundle.set({})
+        try:
+            if skip_txs or tx_limit == 0:
+                dash, toks = await asyncio.gather(
+                    get_dashboard(wallet, no_cache=no_cache, skip_hifo=skip_hifo),
+                    get_tokens(wallet),
+                )
+                return {
+                    "dashboard": dash.model_dump() if hasattr(dash, "model_dump") else dash,
+                    "tokens": toks,
+                    "transactions": [],
+                }
+            dash, toks, txs = await asyncio.gather(
+                get_dashboard(wallet, no_cache=no_cache, skip_hifo=skip_hifo),
+                get_tokens(wallet),
+                get_all_transactions(wallet, tx_limit, skip_hifo=skip_hifo),
+            )
+            return {
+                "dashboard": dash.model_dump() if hasattr(dash, "model_dump") else dash,
+                "tokens": toks,
+                "transactions": txs,
+            }
+        finally:
+            _hifo_initial_load_bundle.reset(tok)
     if skip_txs or tx_limit == 0:
         dash, toks = await asyncio.gather(
             get_dashboard(wallet, no_cache=no_cache, skip_hifo=skip_hifo),

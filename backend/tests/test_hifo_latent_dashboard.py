@@ -118,6 +118,47 @@ def test_dashboard_totals_are_latent_only_excludes_realized():
     conn.close()
 
 
+def test_hifo_initial_load_bundle_reuses_same_pnl():
+    """Context bundle : deux appels _hifo_gain_per_sale_and_lots → même PnL (deepcopy depuis cache)."""
+    wallet = "ffffffffffffffffffffffffffffffff"
+    mint = "TokenMintfffffffffffffffffffffffffffffffffffff"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 50, 100.0, 2.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date)
+        VALUES (1, 1, ?, 1000, 100, 1.0, 100.0, '2024-01-01')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date)
+        VALUES (1, 1, 50, 1.0, 100.0, 2000, '2024-01-02')
+        """,
+    )
+    conn.commit()
+    tok = m._hifo_initial_load_bundle.set({})
+    try:
+        g1, l1 = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+        g2, l2 = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+        assert g1[1]["pnl_usd"] == g2[1]["pnl_usd"]
+        assert len(m._hifo_initial_load_bundle.get()) == 1
+        assert g1 is not g2
+    finally:
+        m._hifo_initial_load_bundle.reset(tok)
+    conn.close()
+
+
 def test_invariant_dashboard_realized_equals_sum_gain_per_sale():
     """Le dashboard agrège exactement les mêmes pnl_usd que _compute_hifo_gain_per_sale (une seule pipeline)."""
     wallet = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
