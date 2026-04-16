@@ -42,6 +42,7 @@ def _mk_schema(conn: sqlite3.Connection) -> None:
             purchase_slot INTEGER DEFAULT 0,
             tokens_bought REAL,
             sol_spent REAL,
+            purchase_price REAL DEFAULT 0,
             sol_usd_at_buy REAL,
             transaction_signature TEXT,
             purchase_date TEXT
@@ -421,5 +422,181 @@ def test_hifo_lots_scaled_when_purchases_exceed_token_invested_usd():
     assert pytest.approx(g1["buy_usd"], rel=1e-6) == 50.0
     assert pytest.approx(g1["sell_usd"], rel=1e-6) == 40.0
     assert pytest.approx(g1["pnl_usd"], rel=1e-6) == -10.0
+
+    conn.close()
+
+
+def test_hifo_cap_uses_user_position_cost_when_purchases_and_token_both_inflated():
+    """
+    Si Σ purchases et invested×SOL sont tous deux gonflés (ex. ~77 $) mais que l’utilisateur a saisi
+    le coût réel de position (ex. 59,50 $), le plafond HIFO doit suivre ce montant.
+    """
+    wallet = "77777777777777777777777777777777"
+    mint = "TokenMint7777777777777777777777777777777777"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy, user_position_cost_usd)
+        VALUES (1, 'MEME', ?, ?, 0, 0, 0, 0.77, 100.0, 100.0, 59.5)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 100.0, 0.77, 100.0, '2024-01-01', 'sigb7')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 0.5893, 100.0, 2000, '2024-01-02', 'sigs7')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    assert pytest.approx(g1["buy_usd"], rel=1e-3) == 59.5
+    assert pytest.approx(g1["sell_usd"], rel=1e-3) == 58.93
+    assert pytest.approx(g1["pnl_usd"], rel=1e-3) == -0.57
+
+    conn.close()
+
+
+def test_hifo_exit_reconciliation_without_user_position_cost():
+    """
+    Même cas « ~77 $ en BDD mais vente ~59 $ » sans coût manuel : le plafond sortie intégrale
+    (recettes vs coût gonflé) doit réduire automatiquement le coût HIFO.
+    """
+    wallet = "66666666666666666666666666666666"
+    mint = "TokenMint6666666666666666666666666666666666"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy)
+        VALUES (1, 'MEME', ?, ?, 0, 0, 0, 0.77, 100.0, 100.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 100.0, 0.77, 100.0, '2024-01-01', 'sigb6')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 0.5893, 100.0, 2000, '2024-01-02', 'sigs6')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    assert g1["buy_usd"] < 65.0, "le coût ne doit plus être ~77 $"
+    assert g1["buy_usd"] > 58.5
+    assert pytest.approx(g1["sell_usd"], rel=1e-3) == 58.93
+    assert g1["pnl_usd"] is not None and g1["pnl_usd"] > -2.0 and g1["pnl_usd"] < 0.5
+
+    conn.close()
+
+
+def test_hifo_merges_split_purchase_rows_same_signature():
+    """Deux lignes purchases (même signature) = un seul lot ; pas de double coût."""
+    wallet = "44444444444444444444444444444444"
+    mint = "TokenMint4444444444444444444444444444444444"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy)
+        VALUES (1, 'MEME', ?, ?, 0, 0, 0, 0.6, 100.0, 100.0)
+        """,
+        (mint, wallet),
+    )
+    sig = "same_sig_split_444"
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 50.0, 0.3, 100.0, '2024-01-01', ?)
+        """,
+        (wallet, sig),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (2, 1, ?, 1000, 50.0, 0.3, 100.0, '2024-01-01', ?)
+        """,
+        (wallet, sig),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 0.59, 100.0, 2000, '2024-01-02', 'sigs4')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    assert pytest.approx(g1["buy_usd"], rel=1e-6) == 60.0
+    assert pytest.approx(g1["sell_usd"], rel=1e-6) == 59.0
+    assert pytest.approx(g1["pnl_usd"], rel=1e-6) == -1.0
+
+    conn.close()
+
+
+def test_repair_duplicate_purchase_rows_merges_sqlite():
+    wallet = "33333333333333333333333333333333"
+    mint = "TokenMint3333333333333333333333333333333333"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 0, 0, 0)
+        """,
+        (mint, wallet),
+    )
+    sig = "dup_repair_sig"
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, 40.0, 0.2, 100.0, '2024-01-01', ?)
+        """,
+        (wallet, sig),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (2, 1, ?, 1000, 60.0, 0.4, 100.0, '2024-01-01', ?)
+        """,
+        (wallet, sig),
+    )
+    conn.commit()
+    n = m._repair_duplicate_purchase_rows(conn)
+    assert n == 1
+    rows = c.execute("SELECT COUNT(*) AS n FROM purchases WHERE token_id = 1").fetchone()
+    assert int(rows["n"]) == 1
+    r = c.execute("SELECT tokens_bought, sol_spent FROM purchases WHERE token_id = 1").fetchone()
+    assert pytest.approx(float(r["tokens_bought"]), rel=1e-6) == 100.0
+    assert pytest.approx(float(r["sol_spent"]), rel=1e-6) == 0.6
 
     conn.close()

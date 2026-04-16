@@ -297,6 +297,167 @@ def _invalidate_wallet_hifo_cache(conn, wallet_address: str):
     conn.commit()
 
 
+def _merge_hifo_lots_duplicate_tx_signatures(lots_by_token: dict) -> None:
+    """
+    Fusionne les lots issus de la même transaction (même signature) pour un token.
+    Sans ça, des doublons BDD (périodes sans UNIQUE fiable) doublent le coût HIFO.
+    """
+    from collections import defaultdict
+
+    for tid in list(lots_by_token.keys()):
+        lots = lots_by_token[tid]
+        if len(lots) < 2:
+            continue
+        no_sig: list = []
+        by_sig: dict[str, list] = defaultdict(list)
+        for l in lots:
+            sig = (l.get("tx_sig") or "").strip()
+            if not sig:
+                no_sig.append(l)
+                continue
+            by_sig[sig].append(l)
+        out = list(no_sig)
+        for sig, group in by_sig.items():
+            if len(group) == 1:
+                out.append(group[0])
+                continue
+            tot_tok = sum(float(x.get("tokens_total") or 0) for x in group)
+            tot_sol = sum(float(x.get("sol_spent") or 0) for x in group)
+            if tot_tok <= 1e-18:
+                continue
+            rem = sum(float(x.get("remaining") or 0) for x in group)
+            w_usd = sum(
+                float(x.get("sol_spent") or 0) * float(x.get("sol_rate_buy") or 0) for x in group
+            )
+            sol_rb = w_usd / tot_sol if tot_sol > 1e-18 else float(group[0].get("sol_rate_buy") or 0)
+            tss = [int(x["ts"]) for x in group if int(x.get("ts") or 0) > 0]
+            ts = min(tss) if tss else int(group[0].get("ts") or 0)
+            slots = [int(x.get("slot") or 0) for x in group]
+            slot = min(slots) if slots else 0
+            out.append(
+                {
+                    "ts": ts,
+                    "slot": slot,
+                    "remaining": rem,
+                    "tokens_total": tot_tok,
+                    "sol_spent": tot_sol,
+                    "sol_rate_buy": sol_rb,
+                    "price_usd": (tot_sol / tot_tok) * sol_rb if tot_tok > 1e-18 else 0.0,
+                    "tx_sig": sig,
+                }
+            )
+        lots_by_token[tid] = out
+
+
+def _repair_duplicate_purchase_rows(conn) -> int:
+    """
+    Fusionne en base les achats en double (même token_id + même signature non vide) : une ligne
+    conservée (id min), sommes SOL / tokens / prix recalculés, autres lignes supprimées.
+    """
+    c = conn.cursor()
+    try:
+        c.execute(
+            """
+            SELECT p.token_id, TRIM(p.transaction_signature) AS sig, COUNT(*) AS n,
+                   MIN(p.id) AS keep_id
+            FROM purchases p
+            WHERE COALESCE(TRIM(p.transaction_signature), '') != ''
+            GROUP BY p.token_id, TRIM(p.transaction_signature)
+            HAVING COUNT(*) > 1
+            """
+        )
+        groups = c.fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    fixed = 0
+    for g in groups:
+        tid = int(g["token_id"])
+        sig = (g["sig"] or "").strip()
+        keep_id = int(g["keep_id"])
+        c.execute(
+            """
+            SELECT COALESCE(SUM(tokens_bought), 0) AS tb,
+                   COALESCE(SUM(sol_spent), 0) AS ss,
+                   COALESCE(SUM(sol_spent * COALESCE(NULLIF(sol_usd_at_buy, 0), 0)), 0) AS sw
+            FROM purchases
+            WHERE token_id = ? AND TRIM(transaction_signature) = ?
+            """,
+            (tid, sig),
+        )
+        agg = c.fetchone()
+        tb = float(agg["tb"] or 0)
+        ss = float(agg["ss"] or 0)
+        sw = float(agg["sw"] or 0)
+        if tb <= 1e-18 or ss <= 1e-18:
+            continue
+        w_rate = sw / ss if ss > 1e-18 else None
+        pp = ss / tb
+        c.execute(
+            """
+            UPDATE purchases SET
+                tokens_bought = ?, sol_spent = ?, purchase_price = ?,
+                sol_usd_at_buy = CASE WHEN ? > 0 THEN ? ELSE sol_usd_at_buy END
+            WHERE id = ?
+            """,
+            (tb, ss, pp, w_rate or 0, w_rate, keep_id),
+        )
+        c.execute(
+            """
+            DELETE FROM purchases
+            WHERE token_id = ? AND TRIM(transaction_signature) = ? AND id != ?
+            """,
+            (tid, sig, keep_id),
+        )
+        fixed += 1
+    if fixed:
+        conn.commit()
+    return fixed
+
+
+def _reconcile_token_totals_from_purchases_sales(conn) -> None:
+    """Recalcule purchased_tokens, invested_amount, sold_tokens, current_tokens depuis purchases/sales."""
+    conn.execute(
+        """
+            UPDATE tokens SET
+                purchased_tokens = COALESCE(
+                    (SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id),
+                    purchased_tokens
+                ),
+                sold_tokens = COALESCE(
+                    (SELECT SUM(tokens_sold) FROM sales WHERE token_id = tokens.id),
+                    0
+                ),
+                invested_amount = COALESCE(
+                    (SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id),
+                    invested_amount
+                ),
+                purchase_price = CASE
+                    WHEN COALESCE((SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id), 0) > 0
+                    THEN (SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id)
+                         / (SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id)
+                    ELSE purchase_price
+                END,
+                sol_usd_at_buy = CASE
+                    WHEN COALESCE((SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id), 0) > 0
+                    THEN (SELECT SUM(p.sol_spent * COALESCE(p.sol_usd_at_buy, 150)) FROM purchases p WHERE p.token_id = tokens.id)
+                         / NULLIF((SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id), 0)
+                    ELSE sol_usd_at_buy
+                END
+            WHERE EXISTS (SELECT 1 FROM purchases WHERE token_id = tokens.id)
+        """
+    )
+    conn.execute(
+        """
+            UPDATE tokens
+            SET current_tokens = MAX(0.0,
+                COALESCE((SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id), 0)
+                - COALESCE((SELECT SUM(tokens_sold) FROM sales WHERE token_id = tokens.id), 0)
+            )
+        """
+    )
+    conn.commit()
+
+
 def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[dict, dict]:
     """
     Simule toutes les ventes HIFO et retourne (gain_per_sale, lots_by_token) avec lots restants mis à jour.
@@ -330,7 +491,8 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                        p.tokens_bought, p.sol_spent,
                        COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?) as sol_rate_buy,
                        p.purchase_date as purchase_date,
-                       'helius' as source
+                       'helius' as source,
+                       COALESCE(TRIM(p.transaction_signature), '') as tx_sig
                 FROM purchases p
                 INNER JOIN tokens t ON p.token_id = t.id
                 WHERE p.tokens_bought > 0 AND p.sol_spent > 0
@@ -343,7 +505,8 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                        t.invested_amount as sol_spent,
                        COALESCE(NULLIF(t.sol_usd_at_buy, 0), ?) as sol_rate_buy,
                        t.purchase_date as purchase_date,
-                       'manual' as source
+                       'manual' as source,
+                       '' as tx_sig
                 FROM tokens t
                 WHERE t.purchased_tokens > 0 
                   AND t.invested_amount > 0
@@ -374,6 +537,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                 "sol_spent": p["sol_spent"],
                 "sol_rate_buy": p["sol_rate_buy"],
                 "price_usd": (p["sol_spent"] / p["tokens_bought"]) * p["sol_rate_buy"] if p["tokens_bought"] else 0,
+                "tx_sig": (p.get("tx_sig") or "") if isinstance(p.get("tx_sig"), str) else "",
             }
         )
 
@@ -403,20 +567,32 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                     "price_usd": (tok["invested_amount"] / tok["purchased_tokens"]) * (tok["sol_usd_at_buy"] or sol_usd)
                     if tok["purchased_tokens"]
                     else 0,
+                    "tx_sig": "",
                 }
             )
 
+    _merge_hifo_lots_duplicate_tx_signatures(lots_by_token)
+
     # Si Σ(coût USD des lots) dépasse le plafond « dépensé réel », les lots ont divergé (doublon
-    # d’import, dérive vs `tokens`, etc.). Plafond = min(Σ purchases, invested×SOL/USD du token)
-    # quand les deux sont disponibles — le plus conservateur évite un coût HIFO > ce que tu as payé.
+    # d’import, dérive vs `tokens`, etc.). Plafond = min(Σ purchases par signature, invested×SOL/USD,
+    # user_position_cost_usd si saisi, plafond sortie intégrale quand purchases et token s’accordent
+    # mais surestiment encore vs les recettes) — le plus conservateur évite un coût HIFO aberrant.
     cursor.execute(
         """
-        SELECT p.token_id,
-               COALESCE(SUM(p.sol_spent * COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?)), 0) AS capu
-        FROM purchases p
-        INNER JOIN tokens t ON p.token_id = t.id
-        WHERE t.wallet_address = ? AND p.tokens_bought > 0 AND p.sol_spent > 0
-        GROUP BY p.token_id
+        SELECT x.token_id, COALESCE(SUM(x.sig_usd), 0) AS capu
+        FROM (
+            SELECT p.token_id,
+                   SUM(p.sol_spent * COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?)) AS sig_usd
+            FROM purchases p
+            INNER JOIN tokens t ON p.token_id = t.id
+            WHERE t.wallet_address = ? AND p.tokens_bought > 0 AND p.sol_spent > 0
+            GROUP BY p.token_id,
+                CASE WHEN COALESCE(TRIM(p.transaction_signature), '') = ''
+                     THEN ('pk:' || CAST(p.id AS TEXT))
+                     ELSE TRIM(p.transaction_signature)
+                END
+        ) AS x
+        GROUP BY x.token_id
         """,
         (sol_usd, wallet),
     )
@@ -424,25 +600,106 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
     cursor.execute(
         """
         SELECT id,
-               COALESCE(invested_amount, 0) * COALESCE(NULLIF(sol_usd_at_buy, 0), ?) AS tok_usd
+               COALESCE(invested_amount, 0) * COALESCE(NULLIF(sol_usd_at_buy, 0), ?) AS tok_usd,
+               COALESCE(user_position_cost_usd, 0) AS user_cap
         FROM tokens
         WHERE wallet_address = ?
         """,
         (sol_usd, wallet),
     )
-    _token_cap_usd = {int(r["id"]): float(r["tok_usd"] or 0) for r in cursor.fetchall()}
+    _token_cap_usd = {}
+    _user_cap_usd = {}
+    for r in cursor.fetchall():
+        tid = int(r["id"])
+        _token_cap_usd[tid] = float(r["tok_usd"] or 0)
+        uc = float(r["user_cap"] or 0)
+        if uc > 1e-12:
+            _user_cap_usd[tid] = uc
+
+    _exit_recon_cap_usd: dict[int, float] = {}
+    cursor.execute(
+        """
+        SELECT s.token_id,
+               COALESCE(SUM(s.tokens_sold), 0) AS sold_tok,
+               COALESCE(SUM(s.sol_received * COALESCE(NULLIF(s.sol_usd_at_sale, 0), ?)), 0) AS sell_usd
+        FROM sales s
+        INNER JOIN tokens t ON s.token_id = t.id
+        WHERE t.wallet_address = ?
+        GROUP BY s.token_id
+        """,
+        (sol_usd, wallet),
+    )
+    _sales_agg = {int(r["token_id"]): (float(r["sold_tok"] or 0), float(r["sell_usd"] or 0)) for r in cursor.fetchall()}
+    cursor.execute(
+        """
+        SELECT p.token_id, COALESCE(SUM(p.tokens_bought), 0) AS bought_tok
+        FROM purchases p
+        INNER JOIN tokens t ON p.token_id = t.id
+        WHERE t.wallet_address = ? AND p.tokens_bought > 0 AND p.sol_spent > 0
+        GROUP BY p.token_id
+        """,
+        (wallet,),
+    )
+    _bought_tok = {int(r["token_id"]): float(r["bought_tok"] or 0) for r in cursor.fetchall()}
+    for tid, (sold_t, sell_u) in _sales_agg.items():
+        if sell_u <= 1e-9 or sold_t <= 1e-9:
+            continue
+        bought = _bought_tok.get(tid, 0.0)
+        if bought < 1e-9 or sold_t < bought * 0.97:
+            continue
+        caps_pre = []
+        if _purchase_cap_usd.get(tid, 0.0) > 1e-12:
+            caps_pre.append(_purchase_cap_usd[tid])
+        if _token_cap_usd.get(tid, 0.0) > 1e-12:
+            caps_pre.append(_token_cap_usd[tid])
+        if _user_cap_usd.get(tid, 0.0) > 1e-12:
+            caps_pre.append(_user_cap_usd[tid])
+        if not caps_pre:
+            continue
+        cap_pu = _purchase_cap_usd.get(tid, 0.0)
+        cap_tu = _token_cap_usd.get(tid, 0.0)
+        # Pas de plafond « on-chain » / token : seul Σ purchases — ne pas rabattre sur les ventes.
+        if cap_tu <= 1e-12 and _user_cap_usd.get(tid, 0.0) <= 1e-12:
+            continue
+        # Le min est déjà celui du token alors que Σ purchases est plus haut : le min() a corrigé.
+        if (
+            cap_pu > cap_tu * 1.03
+            and cap_tu > 1e-12
+            and abs(min(caps_pre) - cap_tu) < 1e-6 * max(cap_tu, 1.0)
+        ):
+            continue
+        cap_base = min(caps_pre)
+        if cap_base <= sell_u * 1.02:
+            continue
+        if sell_u < cap_base * 0.71:
+            continue
+        gap = cap_base - sell_u
+        if gap > max(45.0, cap_base * 0.42):
+            continue
+        frac = max(0.0, min(0.05, 0.35 * (sell_u / cap_base - 0.66)))
+        if frac <= 1e-12:
+            continue
+        cap_exit = sell_u + gap * frac
+        if cap_exit < sell_u * 1.001:
+            continue
+        _exit_recon_cap_usd[tid] = cap_exit
+
+    cap_by_tid: dict[int, float] = {}
     for _tid, _lots in lots_by_token.items():
         tid = int(_tid)
-        cap_p = _purchase_cap_usd.get(tid, 0.0)
-        cap_t = _token_cap_usd.get(tid, 0.0)
-        if cap_p > 1e-12 and cap_t > 1e-12:
-            cap = min(cap_p, cap_t)
-        elif cap_p > 1e-12:
-            cap = cap_p
-        elif cap_t > 1e-12:
-            cap = cap_t
-        else:
+        caps = []
+        if _purchase_cap_usd.get(tid, 0.0) > 1e-12:
+            caps.append(_purchase_cap_usd[tid])
+        if _token_cap_usd.get(tid, 0.0) > 1e-12:
+            caps.append(_token_cap_usd[tid])
+        if _user_cap_usd.get(tid, 0.0) > 1e-12:
+            caps.append(_user_cap_usd[tid])
+        if _exit_recon_cap_usd.get(tid, 0.0) > 1e-12:
+            caps.append(_exit_recon_cap_usd[tid])
+        if not caps:
             continue
+        cap = min(caps)
+        cap_by_tid[tid] = cap
         lot_total = sum(
             float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in _lots
         )
@@ -509,6 +766,29 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             "buy_usd": round(buy_usd_cost, 4),
             "pnl_usd": round(profit, 4) if profit is not None else None,
         }
+
+    # Filet : si la somme des buy_usd des ventes d’un même token dépasse encore le plafond
+    # (arrondis, fallback token, etc.), on réduit proportionnellement pour coller au cap.
+    for tid, cap in cap_by_tid.items():
+        if cap <= 1e-9:
+            continue
+        sold_sum = 0.0
+        sids: list = []
+        for sale in sells_chrono:
+            if int(sale["token_id"]) != tid:
+                continue
+            sid = sale["sale_id"]
+            row = gain_per_sale.get(sid)
+            if row and row.get("buy_usd") is not None:
+                sold_sum += float(row["buy_usd"])
+                sids.append(sid)
+        if sold_sum > cap + 0.05 and sids:
+            factor = cap / sold_sum
+            for sid in sids:
+                row = gain_per_sale[sid]
+                bu = float(row["buy_usd"]) * factor
+                row["buy_usd"] = round(bu, 4)
+                row["pnl_usd"] = round(float(row["sell_usd"]) - row["buy_usd"], 4)
 
     return gain_per_sale, lots_by_token
 
@@ -2124,6 +2404,13 @@ async def startup_event():
             init_postgres_schema(c)
             auth_service.ensure_auth_tables(c)
             conn.commit()
+            try:
+                nd = _repair_duplicate_purchase_rows(conn)
+                if nd:
+                    print(f"[OK] PostgreSQL: fusion automatique de {nd} groupe(s) d'achats en double")
+                    _reconcile_token_totals_from_purchases_sales(conn)
+            except Exception as e:
+                print(f"[!] Dédup achats Postgres au démarrage: {e}")
         print("[OK] Base PostgreSQL initialisee (schema + index)")
     else:
         init_db()
@@ -2230,6 +2517,13 @@ async def startup_event():
                 c.execute("ALTER TABLE purchases ADD COLUMN purchase_slot INTEGER DEFAULT 0")
     
             _migrate_purchases_token_signature_unique(conn)
+            try:
+                nd = _repair_duplicate_purchase_rows(conn)
+                if nd:
+                    print(f"[OK] Achats: fusion automatique de {nd} groupe(s) en double (même token + signature)")
+                    _reconcile_token_totals_from_purchases_sales(conn)
+            except Exception as e:
+                print(f"[!] Dédup achats au démarrage: {e}")
             
             # === CRÉER LES INDEXES POUR MAXIMISER LA PERFORMANCE ===
             indexes = [
@@ -5747,43 +6041,7 @@ async def helius_import_swaps(
     # ── Recalcul final depuis purchases et sales (sources de vérité) ────────
     # Corrige toute dérive dans purchased_tokens, sold_tokens, invested_amount, etc.
     with get_db() as conn:
-        conn.execute("""
-            UPDATE tokens SET
-                purchased_tokens = COALESCE(
-                    (SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id),
-                    purchased_tokens
-                ),
-                sold_tokens = COALESCE(
-                    (SELECT SUM(tokens_sold) FROM sales WHERE token_id = tokens.id),
-                    0
-                ),
-                invested_amount = COALESCE(
-                    (SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id),
-                    invested_amount
-                ),
-                purchase_price = CASE
-                    WHEN COALESCE((SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id), 0) > 0
-                    THEN (SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id)
-                         / (SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id)
-                    ELSE purchase_price
-                END,
-                sol_usd_at_buy = CASE
-                    WHEN COALESCE((SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id), 0) > 0
-                    THEN (SELECT SUM(p.sol_spent * COALESCE(p.sol_usd_at_buy, 150)) FROM purchases p WHERE p.token_id = tokens.id)
-                         / NULLIF((SELECT SUM(sol_spent) FROM purchases WHERE token_id = tokens.id), 0)
-                    ELSE sol_usd_at_buy
-                END
-            WHERE EXISTS (SELECT 1 FROM purchases WHERE token_id = tokens.id)
-        """)
-        # Recalcul de current_tokens : purchased - sold (depuis les tables)
-        conn.execute("""
-            UPDATE tokens
-            SET current_tokens = MAX(0.0,
-                COALESCE((SELECT SUM(tokens_bought) FROM purchases WHERE token_id = tokens.id), 0)
-                - COALESCE((SELECT SUM(tokens_sold) FROM sales WHERE token_id = tokens.id), 0)
-            )
-        """)
-        conn.commit()
+        _reconcile_token_totals_from_purchases_sales(conn)
 
     # ── Mise à jour automatique des prix + gains/pertes après l'import ────
     prices_updated = 0
