@@ -245,19 +245,21 @@ def _tx_signature_recorded_in_db(conn: sqlite3.Connection, signature: str) -> bo
     return False
 
 
-def _lot_eligible_for_sale(lot_ts: int, lot_slot: int, sale_ts: int, sale_slot: int) -> bool:
+def _lot_eligible_for_sale(lot_ts_floor: int, lot_slot: int, sale_ts_ceiling: int, sale_slot: int) -> bool:
     """
-    Un lot d'achat est éligible pour une vente si l'achat a eu lieu avant ou au même moment.
-    Utilise (ts, slot) pour gérer les tx dans le même block (même timestamp).
-    Quand slot=0 (données legacy), on se rabat sur ts seul.
+    Un lot d'achat est éligible pour une vente si l'achat (borne basse) est avant ou au même moment
+    que la vente (borne haute), sur (ts, slot). Borne basse/haute tiennent compte des dates TEXT
+    quand les timestamps unix manquent (évite d’attribuer une vente à des lots « futurs » ou hors fil).
     """
-    if sale_ts == 0:
+    stc = int(sale_ts_ceiling or 0)
+    if stc <= 0:
         return True
-    if lot_ts == 0:
-        return True  # lots manuels sans timestamp
+    ltf = int(lot_ts_floor or 0)
+    if ltf <= 0:
+        return True  # lots manuels / sans date exploitable
     lot_slot = lot_slot or 0
     sale_slot = sale_slot or 0
-    return (lot_ts, lot_slot) <= (sale_ts, sale_slot)
+    return (ltf, lot_slot) <= (stc, sale_slot)
 
 
 def _wallet_hifo_fingerprint(cursor, wallet: str) -> str:
@@ -303,9 +305,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
     from collections import defaultdict
 
     wallet_filter = "AND t.wallet_address = ?"
-    wallet_filter2 = "AND wallet_address = ?"
     params = (wallet,)
-    params2 = (wallet,)
 
     cursor.execute(
         f"""
@@ -313,7 +313,8 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                    s.tokens_sold as token_amount,
                    s.sol_received as sol_amount, s.sol_usd_at_sale,
                    COALESCE(s.sale_timestamp, 0) as sale_ts,
-                   COALESCE(s.sale_slot, 0) as sale_slot
+                   COALESCE(s.sale_slot, 0) as sale_slot,
+                   s.sale_date as sale_date
             FROM sales s
             JOIN tokens t ON s.token_id = t.id
             WHERE 1=1 {wallet_filter}
@@ -328,10 +329,12 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                 SELECT p.token_id, p.purchase_timestamp, COALESCE(p.purchase_slot, 0) as purchase_slot,
                        p.tokens_bought, p.sol_spent,
                        COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?) as sol_rate_buy,
+                       p.purchase_date as purchase_date,
                        'helius' as source
                 FROM purchases p
+                INNER JOIN tokens t ON p.token_id = t.id
                 WHERE p.tokens_bought > 0 AND p.sol_spent > 0
-                {wallet_filter2}
+                  AND t.wallet_address = ?
                 
                 UNION ALL
                 
@@ -339,6 +342,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                        t.purchased_tokens as tokens_bought,
                        t.invested_amount as sol_spent,
                        COALESCE(NULLIF(t.sol_usd_at_buy, 0), ?) as sol_rate_buy,
+                       t.purchase_date as purchase_date,
                        'manual' as source
                 FROM tokens t
                 WHERE t.purchased_tokens > 0 
@@ -346,7 +350,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                   AND t.id NOT IN (SELECT DISTINCT token_id FROM purchases)
                   {wallet_filter}
             """,
-        (sol_usd,) + params2 + (sol_usd,) + params,
+        (sol_usd, wallet, sol_usd, wallet),
     )
 
     lots_by_token: dict = defaultdict(list)
@@ -356,14 +360,14 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         key=lambda x: (
             x["token_id"],
             -(x["sol_spent"] / max(x["tokens_bought"], 0.001) * x["sol_rate_buy"]),
-            x["purchase_timestamp"],
+            _lot_ts_for_hifo(x.get("purchase_timestamp"), x.get("purchase_date")),
         )
     )
 
     for p in raw_lots:
         lots_by_token[p["token_id"]].append(
             {
-                "ts": p["purchase_timestamp"] or 0,
+                "ts": _lot_ts_for_hifo(p.get("purchase_timestamp"), p.get("purchase_date")),
                 "slot": p.get("purchase_slot", 0) or 0,
                 "remaining": p["tokens_bought"],
                 "tokens_total": p["tokens_bought"],
@@ -373,7 +377,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             }
         )
 
-    sells_chrono = sorted(sells_raw, key=lambda x: x.get("sale_ts") or 0)
+    sells_chrono = sorted(sells_raw, key=_sale_sort_key_for_hifo)
 
     cursor.execute(
         """
@@ -416,14 +420,14 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
     for sale in sells_chrono:
         token_id = sale["token_id"]
         tokens_sold = sale["token_amount"] or 0
-        sale_ts = sale["sale_ts"]
+        sale_ts_c = _sale_ts_ceiling_for_hifo(sale.get("sale_ts"), sale.get("sale_date"))
         sale_slot = sale.get("sale_slot", 0) or 0
         sol_rate_s = sale.get("sol_usd_at_sale") or sol_usd
         sell_usd = (sale["sol_amount"] or 0) * sol_rate_s
 
         token_lots = lots_by_token.get(token_id, [])
         eligible = sorted(
-            [l for l in token_lots if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts, sale_slot)],
+            [l for l in token_lots if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts_c, sale_slot)],
             key=lambda l: l["price_usd"],
             reverse=True,
         )
@@ -1761,6 +1765,67 @@ def _parse_activity_ts_candidate(value) -> Optional[datetime]:
         return None
 
 
+def _day_start_end_unix(date_hint) -> tuple[int, int]:
+    """Début / fin de journée UTC pour une date d’activité (TEXT ou datetime)."""
+    dt = _parse_activity_ts_candidate(date_hint)
+    if dt is None:
+        return (0, 0)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    start = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return (int(start.timestamp()), int(end.timestamp()))
+
+
+def _lot_ts_for_hifo(purchase_ts: int | float | None, purchase_date) -> int:
+    """
+    Borne basse d’instant d’achat pour HIFO : unix si présent, sinon minuit UTC du purchase_date.
+    """
+    try:
+        ts = int(purchase_ts or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    if ts > int(1e12):
+        ts = int(ts / 1000)
+    if ts > 0:
+        return ts
+    start, _ = _day_start_end_unix(purchase_date)
+    return start
+
+
+def _sale_ts_ceiling_for_hifo(sale_ts: int | float | None, sale_date) -> int:
+    """
+    Borne haute d’instant de vente pour HIFO : unix si présent, sinon fin de journée UTC du sale_date.
+    """
+    try:
+        ts = int(sale_ts or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    if ts > int(1e12):
+        ts = int(ts / 1000)
+    if ts > 0:
+        return ts
+    _, end = _day_start_end_unix(sale_date)
+    return end
+
+
+def _sale_sort_key_for_hifo(sale: dict) -> tuple:
+    """Tri chronologique des ventes (timestamp, sinon milieu de journée issue de sale_date)."""
+    try:
+        ts = int(sale.get("sale_ts") or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    if ts > int(1e12):
+        ts = int(ts / 1000)
+    if ts > 0:
+        return (ts, int(sale.get("sale_slot") or 0), int(sale.get("sale_id") or 0))
+    start, end = _day_start_end_unix(sale.get("sale_date"))
+    mid = (start + end) // 2 if start > 0 and end > 0 else 0
+    return (mid, int(sale.get("sale_slot") or 0), int(sale.get("sale_id") or 0))
+
+
 def _dt_to_sqlite_recorded_at(dt: datetime) -> str:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
@@ -2795,7 +2860,7 @@ async def get_token_transactions(token_id: int):
             gain_per_sale = _compute_hifo_gain_per_sale(cursor, wa, sol_usd)
         else:
             cursor.execute("""
-                SELECT purchase_timestamp, COALESCE(purchase_slot, 0) as purchase_slot,
+                SELECT purchase_timestamp, purchase_date, COALESCE(purchase_slot, 0) as purchase_slot,
                        tokens_bought, sol_spent,
                        COALESCE(NULLIF(sol_usd_at_buy, 0), ?) as sol_rate_buy
                 FROM purchases
@@ -2806,7 +2871,7 @@ async def get_token_transactions(token_id: int):
             lots = []
             for p in cursor.fetchall():
                 lots.append({
-                    "ts":           p["purchase_timestamp"] or 0,
+                    "ts":           _lot_ts_for_hifo(p.get("purchase_timestamp"), p.get("purchase_date")),
                     "slot":         _row_get(p, "purchase_slot", 0) or 0,
                     "remaining":    p["tokens_bought"],
                     "tokens_total": p["tokens_bought"],
@@ -2814,15 +2879,18 @@ async def get_token_transactions(token_id: int):
                     "sol_rate_buy": p["sol_rate_buy"],
                     "price_usd":    (p["sol_spent"] / p["tokens_bought"]) * p["sol_rate_buy"] if p["tokens_bought"] else 0,
                 })
-            sells_chrono = sorted(sells_raw, key=lambda x: x.get("sale_ts") or 0)
+            for s in sells_raw:
+                if not s.get("sale_date") and s.get("tx_date"):
+                    s["sale_date"] = s["tx_date"]
+            sells_chrono = sorted(sells_raw, key=_sale_sort_key_for_hifo)
             for sale in sells_chrono:
                 tokens_left = sale["token_amount"] or 0
-                sale_ts     = sale["sale_ts"]
+                sale_ts_c = _sale_ts_ceiling_for_hifo(sale.get("sale_ts"), sale.get("sale_date") or sale.get("tx_date"))
                 sale_slot   = sale.get("sale_slot", 0) or 0
                 sol_rate_s  = sale.get("sol_usd_at_sale") or sol_usd
                 sell_usd    = (sale["sol_amount"] or 0) * sol_rate_s
                 eligible = sorted(
-                    [l for l in lots if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts, sale_slot)],
+                    [l for l in lots if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts_c, sale_slot)],
                     key=lambda l: l["price_usd"], reverse=True
                 )
                 buy_usd_cost = 0.0
@@ -4322,7 +4390,7 @@ async def recalculate_history(wallet: Optional[str] = Query(None)):
 
                 # ── Lots d'achat HIFO (prix décroissant, puis chronologique) ──────
                 cursor.execute("""
-                    SELECT purchase_timestamp, COALESCE(purchase_slot, 0) as purchase_slot,
+                    SELECT purchase_timestamp, purchase_date, COALESCE(purchase_slot, 0) as purchase_slot,
                            tokens_bought, sol_spent,
                            COALESCE(NULLIF(sol_usd_at_buy, 0), ?) as sol_rate_buy
                     FROM purchases
@@ -4333,7 +4401,7 @@ async def recalculate_history(wallet: Optional[str] = Query(None)):
                 purchase_lots = [dict(r) for r in cursor.fetchall()]
                 for lot in purchase_lots:
                     lot["remaining"] = lot["tokens_bought"]
-                    lot["ts"] = lot["purchase_timestamp"] or 0
+                    lot["ts"] = _lot_ts_for_hifo(lot.get("purchase_timestamp"), lot.get("purchase_date"))
                     lot["slot"] = lot.get("purchase_slot", 0) or 0
                     lot["price_usd"] = (
                         (lot["sol_spent"] / lot["tokens_bought"]) * lot["sol_rate_buy"]
@@ -4345,23 +4413,25 @@ async def recalculate_history(wallet: Optional[str] = Query(None)):
                     SELECT tokens_sold, sol_received,
                            COALESCE(sale_timestamp, 0) as sale_ts,
                            COALESCE(sale_slot, 0) as sale_slot,
-                           COALESCE(NULLIF(sol_usd_at_sale, 0), ?) as sol_rate_sell
+                           sale_date,
+                           COALESCE(NULLIF(sol_usd_at_sale, 0), ?) as sol_rate_sell,
+                           id as sale_id
                     FROM sales WHERE token_id = ?
                     ORDER BY COALESCE(sale_timestamp, 0) ASC
                 """, (sol_usd, token_id))
-                token_sales = cursor.fetchall()
+                token_sales = [dict(r) for r in cursor.fetchall()]
 
                 realized_cost_usd = 0.0
                 sales_usd         = 0.0
                 for s in token_sales:
                     tokens_left = s["tokens_sold"]
-                    sale_ts     = s["sale_ts"]
+                    sale_ts_c = _sale_ts_ceiling_for_hifo(s.get("sale_ts"), s.get("sale_date"))
                     sale_slot   = _row_get(s, "sale_slot", 0) or 0
                     sales_usd  += (s["sol_received"] or 0) * s["sol_rate_sell"]
 
                     eligible = sorted(
                         [l for l in purchase_lots
-                         if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts, sale_slot)],
+                         if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts_c, sale_slot)],
                         key=lambda l: l["price_usd"], reverse=True
                     )
                     for lot in eligible:

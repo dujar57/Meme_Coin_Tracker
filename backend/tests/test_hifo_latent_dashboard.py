@@ -24,6 +24,7 @@ def _mk_schema(conn: sqlite3.Connection) -> None:
             name TEXT,
             address TEXT NOT NULL,
             wallet_address TEXT,
+            purchase_date TEXT,
             current_tokens REAL,
             current_value REAL,
             current_price REAL,
@@ -334,5 +335,46 @@ def test_auto_remaining_cost_partial_sell_halves_cost():
     cost_map, pos_map = m._remaining_avg_cost_and_pos_by_token_ids(c, [1], 100.0)
     assert pytest.approx(cost_map[1], rel=1e-6) == 50.0
     assert pytest.approx(pos_map[1], rel=1e-6) == 50.0
+
+    conn.close()
+
+
+def test_hifo_counts_purchase_when_purchase_row_wallet_is_null():
+    """
+    Achats avec `purchases.wallet_address` NULL (anciennes lignes) : le lot doit compter pour le HIFO
+    dès que le token est rattaché au bon wallet (même critère que la liste des transactions).
+    """
+    wallet = "99999999999999999999999999999999"
+    mint = "TokenMint9999999999999999999999999999999999"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'MEME', ?, ?, 0, 0, 0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, NULL, 1000, 100.0, 1.0, 100.0, '2024-01-01', 'sigbuy9')
+        """,
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100.0, 0.95, 100.0, 2000, '2024-01-02', 'sigsell9')
+        """,
+    )
+    conn.commit()
+
+    gain, _lots = m._hifo_gain_per_sale_and_lots(c, wallet, 100.0)
+    g1 = gain[1]
+    assert pytest.approx(g1["buy_usd"], rel=1e-6) == 100.0
+    assert pytest.approx(g1["sell_usd"], rel=1e-6) == 95.0
+    assert pytest.approx(g1["pnl_usd"], rel=1e-6) == -5.0
 
     conn.close()
