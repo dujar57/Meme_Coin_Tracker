@@ -2302,20 +2302,23 @@ function showDashboardCardTransactions(filter) {
             }
         </div>`;
     const tbody = document.getElementById('dashboard-tx-body');
-    if (txs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-400 text-base">Aucune transaction correspondante</td></tr>`;
-    } else {
-        tbody.innerHTML = txs.map(tx => {
-            const date = formatDateFr(tx.tx_timestamp || tx.tx_date);
-            const pnl = tx.pnl_usd ?? 0;
-            const pnlColor = pnl >= 0 ? 'emerald-600' : 'rose-500';
-            const pnlPctStr = formatRealizedPnlVsHifoCostPct(pnl, tx.cost_usd);
-            const pnlPctHtml = pnlPctStr
-                ? ` <span class="text-gray-600 font-semibold text-base" title="P/L ÷ coût HIFO de la vente">(${pnlPctStr})</span>`
-                : '';
-            const costHint = tx.cost_usd != null ? `<br><span class="text-gray-500 text-sm leading-tight">coût HIFO ${formatCurrency(tx.cost_usd)}</span>` : '';
-            const sigLink = tx.transaction_signature ? `<a href="https://solscan.io/tx/${tx.transaction_signature}" target="_blank" rel="noopener" class="text-teal-500 hover:text-teal-700 ml-1.5 inline-flex align-middle" title="Solscan"><i class="fas fa-external-link-alt text-sm"></i></a>` : '';
-            return `<tr class="border-t border-teal-100/80 hover:bg-teal-50/50 transition">
+    const mobileCards = document.getElementById('dashboard-tx-mobile-cards');
+    const usePhoneCards =
+        typeof window !== 'undefined' &&
+        window.matchMedia &&
+        window.matchMedia('(max-width: 639px)').matches;
+
+    const rowHtmlDesktop = (tx) => {
+        const date = formatDateFr(tx.tx_timestamp || tx.tx_date);
+        const pnl = tx.pnl_usd ?? 0;
+        const pnlColor = pnl >= 0 ? 'emerald-600' : 'rose-500';
+        const pnlPctStr = formatRealizedPnlVsHifoCostPct(pnl, tx.cost_usd);
+        const pnlPctHtml = pnlPctStr
+            ? ` <span class="text-gray-600 font-semibold text-base" title="P/L ÷ coût HIFO de la vente">(${pnlPctStr})</span>`
+            : '';
+        const costHint = tx.cost_usd != null ? `<br><span class="text-gray-500 text-sm leading-tight">coût HIFO ${formatCurrency(tx.cost_usd)}</span>` : '';
+        const sigLink = tx.transaction_signature ? `<a href="https://solscan.io/tx/${tx.transaction_signature}" target="_blank" rel="noopener" class="text-teal-500 hover:text-teal-700 ml-1.5 inline-flex align-middle" title="Solscan"><i class="fas fa-external-link-alt text-sm"></i></a>` : '';
+        return `<tr class="border-t border-teal-100/80 hover:bg-teal-50/50 transition">
                 <td class="py-3.5 px-2 sm:px-3 text-gray-600 whitespace-nowrap align-top">${date}${sigLink}</td>
                 <td class="py-3.5 px-2 sm:px-3 align-top"><span class="inline-flex px-2.5 py-1 bg-rose-100 text-rose-700 rounded-full text-sm font-semibold">📤 Vente</span></td>
                 <td class="py-3.5 px-2 sm:px-3 font-semibold text-teal-900 align-top">${tx.token_name || '—'}</td>
@@ -2324,7 +2327,64 @@ function showDashboardCardTransactions(filter) {
                 <td class="py-3.5 px-2 sm:px-3 text-right font-bold text-teal-900 align-top">${formatCurrency(tx.amount_usd || 0)}</td>
                 <td class="py-3.5 px-2 sm:px-3 text-right font-bold text-${pnlColor} text-lg align-top">${pnl >= 0 ? '+' : ''}${formatCurrency(pnl)}${pnlPctHtml}${costHint}</td>
             </tr>`;
-        }).join('');
+    };
+
+    const rowHtmlPhoneCard = (tx) => {
+        const date = formatDateFr(tx.tx_timestamp || tx.tx_date);
+        const pnl = tx.pnl_usd ?? 0;
+        const pnlPos = pnl >= 0;
+        const pnlPctStr = formatRealizedPnlVsHifoCostPct(pnl, tx.cost_usd);
+        const name = _escAttr(String(tx.token_name || '—'));
+        const addr = tx.token_address ? _escAttr(String(tx.token_address)) : '';
+        const addrShort = addr.length > 14 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
+        const sig = tx.transaction_signature ? String(tx.transaction_signature) : '';
+        const sigLink = sig
+            ? `<a href="https://solscan.io/tx/${encodeURIComponent(sig)}" target="_blank" rel="noopener" class="m-tx-card__link" title="Solscan"><i class="fas fa-external-link-alt"></i></a>`
+            : '';
+        const pnlCls = pnlPos ? 'm-tx-card__pnl--gain' : 'm-tx-card__pnl--loss';
+        const costLine =
+            tx.cost_usd != null && Number.isFinite(Number(tx.cost_usd))
+                ? `<p class="m-tx-card__cost">Coût HIFO · ${formatCurrency(tx.cost_usd)}</p>`
+                : '';
+        const pctLine = pnlPctStr
+            ? `<span class="m-tx-card__pct" title="P/L ÷ coût HIFO">(${pnlPctStr})</span>`
+            : '';
+        return `<article class="m-tx-card rounded-2xl border border-slate-600/50 bg-gradient-to-br from-slate-900 to-slate-950 text-left p-4 shadow-xl">
+            <div class="m-tx-card__top">
+                <div class="m-tx-card__title-block">
+                    <h4 class="m-tx-card__token text-white text-base tracking-tight">${name}</h4>
+                    ${addr ? `<p class="m-tx-card__addr">${addrShort}${sigLink}</p>` : `<p class="m-tx-card__addr">${sigLink}</p>`}
+                </div>
+                <span class="m-tx-card__badge">Vente</span>
+            </div>
+            <p class="m-tx-card__date">${date}</p>
+            <div class="m-tx-card__grid">
+                <div><span class="m-tx-card__lbl">Quantité</span><span class="m-tx-card__val font-mono">${formatNumber(tx.token_amount || 0)}</span></div>
+                <div><span class="m-tx-card__lbl">Prix / unité</span><span class="m-tx-card__val font-mono">${formatPrice(tx.price_usd || 0)}</span></div>
+                <div class="m-tx-card__grid-span2"><span class="m-tx-card__lbl">Montant</span><span class="m-tx-card__val m-tx-card__val--lg">${formatCurrency(tx.amount_usd || 0)}</span></div>
+            </div>
+            <div class="m-tx-card__footer">
+                <p class="m-tx-card__pnl ${pnlCls}">${pnlPos ? '+' : ''}${formatCurrency(pnl)} ${pctLine}</p>
+                ${costLine}
+            </div>
+        </article>`;
+    };
+
+    if (usePhoneCards && mobileCards) {
+        if (tbody) tbody.innerHTML = '';
+        if (txs.length === 0) {
+            mobileCards.innerHTML =
+                '<p class="text-center py-12 text-gray-400 text-sm px-2">Aucune transaction correspondante</p>';
+        } else {
+            mobileCards.innerHTML = txs.map((tx) => rowHtmlPhoneCard(tx)).join('');
+        }
+    } else {
+        if (mobileCards) mobileCards.innerHTML = '';
+        if (txs.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 text-gray-400 text-base">Aucune transaction correspondante</td></tr>`;
+        } else {
+            tbody.innerHTML = txs.map((tx) => rowHtmlDesktop(tx)).join('');
+        }
     }
     document.getElementById('dashboard-tx-modal').classList.remove('hidden');
     document.body.style.overflow = 'hidden';

@@ -370,3 +370,127 @@ body {
 #app .text-teal-400 {
   color: var(--mw-mint) !important;
 }
+
+/* Liste transactions dashboard — cartes téléphone (injectées par app.js) */
+#dashboard-tx-mobile-cards .m-tx-card {
+  border-radius: 1.1rem;
+  padding: 1rem 1.05rem;
+  background: linear-gradient(155deg, rgba(32, 28, 48, 0.98) 0%, rgba(18, 16, 28, 0.96) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__token {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #faf8ff;
+  letter-spacing: -0.02em;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__addr {
+  margin: 0.2rem 0 0;
+  font-size: 0.7rem;
+  font-family: ui-monospace, monospace;
+  color: var(--mw-muted2);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__link {
+  color: var(--mw-mint2);
+  padding: 0.25rem;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__badge {
+  flex-shrink: 0;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.35rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(251, 113, 133, 0.18);
+  color: #fda4af;
+  border: 1px solid rgba(251, 113, 133, 0.35);
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__date {
+  margin: 0.5rem 0 0.65rem;
+  font-size: 0.75rem;
+  color: var(--mw-muted);
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 0.75rem;
+  padding: 0.65rem 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__grid-span2 {
+  grid-column: 1 / -1;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__lbl {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mw-muted2);
+  margin-bottom: 0.15rem;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__val {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #e8e4f5;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__val--lg {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__footer {
+  margin-top: 0.75rem;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__pnl {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__pnl--gain {
+  color: #4ade80;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__pnl--loss {
+  color: #fb7185;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__pct {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--mw-muted);
+  margin-left: 0.25rem;
+}
+
+#dashboard-tx-mobile-cards .m-tx-card__cost {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  color: var(--mw-muted2);
+}

@@ -277,8 +277,8 @@
             }
         }
     </style>
-    <!-- UI mobile type Phantom / Zerion / Jupiter : uniquement ≤639px (voir media) -->
-    <link rel="stylesheet" href="mobile-wallet-ui.css" media="(max-width: 639px)">
+    <!-- UI mobile : chemin absolu + version pour éviter cache ; media = téléphone seulement -->
+    <link rel="stylesheet" href="/mobile-wallet-ui.css?v=5" media="(max-width: 639px)">
 </head>
 <body>
     <!-- Barre de chargement globale (toujours visible pendant tout chargement) -->
@@ -691,7 +691,9 @@
                     </button>
                 </div>
                 <div id="dashboard-tx-summary" class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 shrink-0"></div>
-                <div class="flex-1 min-h-0 overflow-y-auto overflow-x-auto scroll-touch rounded-xl border border-teal-100/60 bg-white/40">
+                <!-- Téléphone : liste cartes (pas de tableau horizontal) ; ≥640px : tableau inchangé -->
+                <div id="dashboard-tx-mobile-cards" class="block sm:hidden flex-1 min-h-0 overflow-y-auto scroll-touch space-y-3 pb-2 -mx-1 px-1"></div>
+                <div id="dashboard-tx-table-wrap" class="hidden sm:flex flex-1 min-h-0 overflow-y-auto overflow-x-auto scroll-touch rounded-xl border border-teal-100/60 bg-white/40">
                     <table class="w-full min-w-[860px] text-base leading-snug">
                         <thead class="sticky top-0 bg-white/95 backdrop-blur-md z-[1] shadow-sm">
                             <tr class="text-gray-600 border-b-2 border-teal-100">
@@ -861,6 +863,6 @@
     </div>
 
     <script src="api-config.js?v=1"></script>
-    <script src="app.js?v=27"></script>
+    <script src="app.js?v=28"></script>
 </body>
 </html>
