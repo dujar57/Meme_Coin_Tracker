@@ -504,6 +504,51 @@ def test_repair_gain_per_sale_buy_vs_purchase_caps_rizzmas_case():
     assert gain[1]["pnl_usd"] < 0.5
 
 
+def test_hifo_e2e_rizzmas_like_quantities_wrong_user_position():
+    """
+    Pipeline complet `_compute_hifo_gain_per_sale` : mêmes ordres de grandeur que la capture
+    (27,95M tokens, achat ~59,50 $, vente ~58,93 $, user_position erroné 8,55 $).
+    """
+    wallet = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    mint = "Mbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    qty = 27952342.694
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy, user_position_cost_usd)
+        VALUES (1, 'Rizzmas', ?, ?, 0, 0, 0, 0.595, ?, 100.0, 8.55)
+        """,
+        (mint, wallet, qty),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES (1, 1, ?, 1000, ?, 0.595, 100.0, '2024-01-01', 'riz_buy')
+        """,
+        (wallet, qty),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, ?, 0.5893, 100.0, 2000, '2024-01-02', 'riz_sell')
+        """,
+        (qty,),
+    )
+    conn.commit()
+
+    gain = m._compute_hifo_gain_per_sale(c, wallet, 100.0)
+    g1 = gain[1]
+    assert pytest.approx(g1["sell_usd"], rel=1e-6) == 58.93
+    assert abs(float(g1["buy_usd"]) - 59.5) < 1.5, f"buy_usd ~59.5 attendu, obtenu {g1['buy_usd']}"
+    assert g1["pnl_usd"] is not None and -2.0 < float(g1["pnl_usd"]) < 0.5, f"pnl ~-0.57 attendu, obtenu {g1['pnl_usd']}"
+
+    conn.close()
+
+
 def test_persisted_hifo_buy_corrupt_detector():
     assert m._persisted_hifo_buy_looks_corrupt_vs_sale(58.93, 8.55)
     assert not m._persisted_hifo_buy_looks_corrupt_vs_sale(58.93, 55.0)
