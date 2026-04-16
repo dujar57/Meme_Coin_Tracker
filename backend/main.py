@@ -91,7 +91,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 3
+HIFO_LOGIC_VERSION = 4
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -600,6 +600,13 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
 
     _merge_hifo_lots_duplicate_tx_signatures(lots_by_token)
 
+    lot_usd_before_cap: dict[int, float] = {
+        int(tid): sum(
+            float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in lots
+        )
+        for tid, lots in lots_by_token.items()
+    }
+
     # Si Σ(coût USD des lots) dépasse le plafond « dépensé réel », les lots ont divergé (doublon
     # d’import, dérive vs `tokens`, etc.). Plafond = min(Σ purchases par signature, invested×SOL/USD,
     # user_position_cost_usd si saisi, plafond sortie intégrale quand purchases et token s’accordent
@@ -743,6 +750,17 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         if not caps:
             continue
         cap = min(caps)
+        sold_full, su_tot = _sales_agg.get(tid, (0.0, 0.0))
+        btok = _bought_tok.get(tid, 0.0)
+        lot_anchor = lot_usd_before_cap.get(tid, lot_total_pre)
+        if (
+            su_tot > 1e-6
+            and btok > 1e-9
+            and sold_full >= btok * 0.97
+            and cap + 1e-6 < su_tot * 0.18
+            and lot_anchor > su_tot * 0.88
+        ):
+            cap = min(lot_anchor, su_tot * 1.08)
         cap_by_tid[tid] = cap
         lot_total = sum(
             float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in _lots
@@ -796,10 +814,21 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         tid_int = int(token_id)
         cp = _purchase_cap_usd.get(tid_int, 0.0)
         bt = _bought_tok.get(tid_int, 0.0)
+        lot_u_anchor = lot_usd_before_cap.get(tid_int, 0.0)
+        cp_eff = cp
+        if (
+            bt > 1e-9
+            and tokens_sold >= bt * 0.97
+            and sell_usd > 1e-6
+            and cp > 1e-9
+            and cp + 1e-6 < sell_usd * 0.18
+            and lot_u_anchor > sell_usd * 0.88
+        ):
+            cp_eff = min(lot_u_anchor, sell_usd * 1.08)
 
         if buy_usd_cost <= 0 and tokens_sold > 0:
-            if cp > 1e-9 and bt > 1e-9:
-                buy_usd_cost = tokens_sold * (cp / bt)
+            if cp_eff > 1e-9 and bt > 1e-9:
+                buy_usd_cost = tokens_sold * (cp_eff / bt)
             else:
                 tok = token_fallback.get(token_id)
                 if tok and (tok.get("purchased_tokens") or 0) > 0:
@@ -812,10 +841,10 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             buy_usd_cost > 0
             and tokens_sold > 0
             and sell_usd > 1e-6
-            and cp > 1e-9
+            and cp_eff > 1e-9
             and bt > 1e-9
         ):
-            alt = tokens_sold * (cp / bt)
+            alt = tokens_sold * (cp_eff / bt)
             if (
                 buy_usd_cost < sell_usd * 0.82
                 and alt > buy_usd_cost * 1.12
