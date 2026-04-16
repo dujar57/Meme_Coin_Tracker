@@ -91,7 +91,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 7
+HIFO_LOGIC_VERSION = 8
 
 # À l’import Helius : ne pas traiter wSOL comme achat/vente de « token » (c’est du SOL wrappé, pas un meme).
 _IMPORT_IGNORE_SPL_MINTS: frozenset[str] = frozenset({SOL_MINT})
@@ -6498,9 +6498,13 @@ def _repair_gain_per_sale_buy_vs_purchase_caps(
     bought_tok: dict[int, float],
 ) -> None:
     """
-    Dernier filet : coût HIFO d’une vente très bas vs recettes alors que Σ achats USD (agrégat SQL)
-    est cohérent avec la vente → coût = prorata Σ achats (évite gains mirage type ~8 $ vs ~59 $).
-    Ne s’applique pas si Σ achats est lui-même très bas (ex. vraie lune avec peu dépensé en BDD).
+    Dernier filet : coût HIFO calculé très bas par rapport au **prorata Σ achats USD / Σ tokens**
+    pour ce volume vendu (vwap_alloc), alors que ce prorata est cohérent avec les recettes
+    (ex. vente ~58 $, coût affiché ~27 $ alors que les achats en BDD impliquent ~62 $ pour ce lot).
+
+    L’ancien critère « coût < 30 % des recettes » ne captait pas ~45–50 % (cas Rizzmas déc. 2025).
+
+    Ne s’applique pas si vwap_alloc est très bas vs la vente (ex. lune : peu dépensé en BDD).
     """
     for sale in sells_chrono:
         sid = sale["sale_id"]
@@ -6517,12 +6521,14 @@ def _repair_gain_per_sale_buy_vs_purchase_caps(
         ts = float(sale.get("token_amount") or 0)
         if bt < 1e-9 or ts < 1e-9 or pc < 1e-6:
             continue
-        if pc + 1e-6 < sell_u * 0.68:
-            continue
-        if buy_u + 1e-6 >= sell_u * 0.30:
-            continue
         vwap_alloc = pc * (ts / bt)
         if vwap_alloc + 1e-6 < sell_u * 0.62:
+            continue
+        # Prorata Σ achats / Σ tokens peut inclure des achats postérieurs à cette vente →
+        # si >> recettes de la vente, ne pas « corriger » (évite faux coûts sur vieilles ventes).
+        if vwap_alloc > sell_u * 1.28 + 1e-6:
+            continue
+        if buy_u + 1e-6 >= vwap_alloc * 0.88:
             continue
         new_buy = min(vwap_alloc, sell_u * 1.06)
         row["buy_usd"] = round(new_buy, 4)

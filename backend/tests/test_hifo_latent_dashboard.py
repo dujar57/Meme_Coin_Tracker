@@ -563,6 +563,27 @@ def test_repair_gain_per_sale_buy_vs_purchase_caps_rizzmas_case():
     assert gain[1]["pnl_usd"] < 0.5
 
 
+def test_repair_phantom_gain_mid_40pct_of_sale_dec2025_rizzmas():
+    """Coût ~46 % des recettes (ex. 26,61 $ / 58,11 $) : l’ancien seuil < 30 % ne corrigeait pas."""
+    sales = [{"sale_id": 1, "token_id": 1, "token_amount": 16_471_771.804}]
+    gain = {1: {"sell_usd": 58.11, "buy_usd": 26.61, "pnl_usd": 31.5}}
+    pc = {1: 62.37}
+    bt = {1: 16_471_771.804}
+    m._repair_gain_per_sale_buy_vs_purchase_caps(gain, sales, pc, bt)
+    assert gain[1]["buy_usd"] > 50.0
+    assert float(gain[1]["pnl_usd"]) < -2.0
+
+
+def test_repair_second_rizzmas_sale_dec2025():
+    sales = [{"sale_id": 2, "token_id": 1, "token_amount": 14_718_197.646}]
+    gain = {2: {"sell_usd": 53.07, "buy_usd": 23.78, "pnl_usd": 29.3}}
+    pc = {1: 59.41}
+    bt = {1: 14_718_197.646}
+    m._repair_gain_per_sale_buy_vs_purchase_caps(gain, sales, pc, bt)
+    assert gain[2]["buy_usd"] > 48.0
+    assert float(gain[2]["pnl_usd"]) < -2.0
+
+
 def test_hifo_e2e_rizzmas_like_quantities_wrong_user_position():
     """
     Pipeline complet `_compute_hifo_gain_per_sale` : mêmes ordres de grandeur que la capture
