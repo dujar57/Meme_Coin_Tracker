@@ -93,7 +93,7 @@ BLACKLISTED_MINTS: set[str] = set()
 
 # Incrémenter après chaque changement des règles HIFO / plafonds : l’empreinte wallet inclut cette
 # valeur pour invalider wallet_hifo_cache et éviter d’afficher d’anciens hifo_* après un déploiement.
-HIFO_LOGIC_VERSION = 9
+HIFO_LOGIC_VERSION = 10
 
 # --- HIFO : ce que le code garantit (réalité = données BDD achats/ventes + ces règles) ---
 # 1. Source unique du P/L par vente : _hifo_gain_per_sale_and_lots → _compute_hifo_gain_per_sale.
@@ -106,6 +106,8 @@ HIFO_LOGIC_VERSION = 9
 #    par signature sans dérive (objectif long terme : qualité des imports).
 # 5. GET /api/initial-load active un cache de requête (contextvar) : une seule exécution de
 #    _hifo_gain_per_sale_and_lots par (wallet, SOL/USD arrondi) pour dashboard + tokens + tx.
+# 5b. POST /api/recalculate-history utilise le même cache pour : détails (lots + gain_per_sale),
+#     _persist_wallet_hifo puis _sync_tokens_gain_loss_hifo — un seul HIFO/caps par wallet par requête.
 # 6. Repair VWAP : si prorata Σ achats > 112 % des recettes de la vente, on n’applique pas le filet
 #    (évite « pertes » fictives quand Σ achats BDD est gonflé vs le prix de cession).
 
@@ -928,6 +930,8 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         gain_per_sale, sells_chrono, _purchase_cap_usd, _bought_tok
     )
 
+    _hifo_reconcile_lots_remaining_usd_scale(gain_per_sale, sells_chrono, lots_by_token)
+
     if bundle is not None and wkey:
         bundle[(wkey, sol_key)] = (gain_per_sale, lots_by_token)
 
@@ -940,6 +944,65 @@ def _compute_hifo_gain_per_sale(cursor, wallet: str, sol_usd: float) -> dict:
     return g
 
 
+def _hifo_reconcile_lots_remaining_usd_scale(
+    gain_per_sale: dict,
+    sells_chrono: list,
+    lots_by_token: dict,
+) -> None:
+    """
+    Les filets sur gain_per_sale (plafond Σ buy par token, repair) ne réécrivent pas les lots.
+    Pour chaque token : T = Σ sol_spent×sol_rate sur les lots (post-échelle plafond lots) ;
+    realized = Σ buy_usd des ventes ; coût latent cible = max(0, T − realized).
+    Si le coût latent issu des remaining (sans scale) s’en écarte, on pose _rem_usd_scale sur
+    chaque lot encore ouvert (même facteur) — les quantités remaining en tokens ne bougent pas.
+    """
+    tids: set[int] = set()
+    for s in sells_chrono:
+        try:
+            tids.add(int(s["token_id"]))
+        except (TypeError, ValueError):
+            continue
+    for k in lots_by_token.keys():
+        try:
+            tids.add(int(k))
+        except (TypeError, ValueError):
+            continue
+
+    for tid in tids:
+        lots = lots_by_token.get(tid) or []
+        if not lots:
+            continue
+        T = sum(
+            float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in lots
+        )
+        if T <= 1e-9:
+            continue
+        realized = 0.0
+        for s in sells_chrono:
+            if int(s["token_id"]) != tid:
+                continue
+            sid = s.get("sale_id")
+            row = gain_per_sale.get(sid) if sid is not None else None
+            if row and row.get("buy_usd") is not None:
+                realized += float(row["buy_usd"])
+        target_rem = max(0.0, T - realized)
+        for l in lots:
+            l.pop("_rem_usd_scale", None)
+        cur_rem = _hifo_remaining_cost_usd(lots_by_token, tid)
+        tol = max(0.03, 1e-4 * T)
+        if abs(cur_rem - target_rem) <= tol:
+            continue
+        if cur_rem <= 1e-12:
+            continue
+        k = target_rem / cur_rem
+        if not math.isfinite(k) or k < 0:
+            continue
+        k = min(k, 10.0)
+        for l in lots:
+            if float(l.get("remaining") or 0) > 1e-18:
+                l["_rem_usd_scale"] = k
+
+
 def _hifo_remaining_cost_usd(lots_by_token: dict, token_id: int) -> float:
     s = 0.0
     for l in lots_by_token.get(token_id, []) or []:
@@ -949,7 +1012,15 @@ def _hifo_remaining_cost_usd(lots_by_token: dict, token_id: int) -> float:
         tot = float(l.get("tokens_total") or 0)
         if tot <= 0:
             continue
-        s += (rem / tot) * float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0)
+        scale = float(l.get("_rem_usd_scale", 1.0))
+        if not math.isfinite(scale) or scale < 0:
+            scale = 1.0
+        s += (
+            (rem / tot)
+            * float(l.get("sol_spent") or 0)
+            * float(l.get("sol_rate_buy") or 0)
+            * scale
+        )
     return s
 
 
@@ -1280,13 +1351,15 @@ def _sync_tokens_gain_loss_hifo_for_wallets(conn, sol_usd: float, wallet_address
     conn.commit()
 
 
-def _persist_wallet_hifo(conn, wallet: str, sol_usd: float):
-    """Calcule le HIFO (aligné sur all-transactions), écrit chaque vente + ligne agrégée wallet."""
+def _persist_wallet_hifo(conn, wallet: str, sol_usd: float, gain_per_sale: dict | None = None):
+    """Calcule le HIFO (aligné sur all-transactions), écrit chaque vente + ligne agrégée wallet.
+    Si gain_per_sale est fourni (ex. même dict que _hifo_gain_per_sale_and_lots), évite un second passage HIFO."""
     if not wallet or not str(wallet).strip():
         return
     w = str(wallet).strip()
     c = conn.cursor()
-    gain_per_sale = _compute_hifo_gain_per_sale(c, w, sol_usd)
+    if gain_per_sale is None:
+        gain_per_sale = _compute_hifo_gain_per_sale(c, w, sol_usd)
     realized_gain = 0.0
     realized_loss = 0.0
     for sid, d in gain_per_sale.items():
@@ -4821,13 +4894,33 @@ async def update_prices_for_tokens(body: UpdatePricesForTokensBody = Body(...), 
     return {"message": f"{updated} tokens mis à jour", "updated": updated}
 
 
+RECALCULATE_HISTORY_DETAILS_LEGEND = {
+    "token_id": "Identifiant token.",
+    "invested_usd": "Base coût « vie de position » = realized_cost + remaining_basis_usd (cohérent HIFO après filets ; voir HIFO_LOGIC_VERSION).",
+    "realized_cost": "Somme des coûts d’achat HIFO USD attribués aux ventes (sales), après plafonds / repair — aligné sur sales.hifo_buy_cost_usd.",
+    "remaining_basis_usd": "Coût USD encore attaché aux lots ouverts (tokens non vendus), incl. ajustement _rem_usd_scale si filets ventes seuls ; peut être rescalé vs current_tokens comme le dashboard latent.",
+    "realized_pnl_usd": "Somme des P/L USD réalisés par vente (Σ pnl_usd HIFO par sale du token).",
+    "current_value": "Valeur courante enregistrée (current_value ou tokens × prix).",
+    "sales_usd": "Somme des recettes USD des ventes au taux figé (aligné gain_per_sale.sell_usd).",
+    "gain": "Gain brut intermédiaire max(0, valeur totale − invested_usd) ; les tokens avec wallet valide sont réécrits juste après par _sync_tokens_gain_loss_hifo_for_wallets (P/L latent seul).",
+    "loss": "Perte brute intermédiaire ; idem réécriture sync HIFO latent pour wallets valides.",
+}
+
+
 @app.post("/api/recalculate-history")
 async def recalculate_history(wallet: Optional[str] = Query(None)):
     """
-    Simule tout le wallet en HIFO, écrit hifo_pnl_usd sur chaque vente + gain/loss latent sur les tokens.
+    Simule tout le wallet en HIFO (source unique _hifo_gain_per_sale_and_lots : merge lots, plafonds Σ lots,
+    ventes, filets sur buy_usd, repair, réconciliation latent — **aucune** logique de cap dupliquée ici).
+    Un cache de requête (_hifo_initial_load_bundle) réutilise le même résultat pour les ``details``,
+    ``_persist_wallet_hifo`` et ``_sync_tokens_gain_loss_hifo_for_wallets`` (comme /api/initial-load).
     Les PnL de ventes passées sont ainsi figés en BDD (le dashboard les relit sans refaire varier au cours du SOL).
     Le latent des positions ouvertes continue de bouger avec les prix entre deux recalculs ; ce POST surtout après
     import, nouvelle vente, ou correction de données.
+
+    Réponse JSON :
+    - ``message``, ``recalculated``, ``details`` (liste d’objets ; voir ``details_legend``).
+    - ``details_legend`` : descriptif des clés d’un élément de ``details`` (évite la confusion invested vs remaining).
     """
     # Utilise uniquement le dernier taux SOL/USD stocké en BDD (pas d'appel réseau)
     with get_db() as _conn:
@@ -4842,137 +4935,184 @@ async def recalculate_history(wallet: Optional[str] = Query(None)):
         else:
             sol_usd = float(_r["sol_usd_at_buy"])
 
+    w_filter = (wallet or "").strip()
+    # Même mécanisme qu’initial-load : la sync HIFO en fin de route rappelle _hifo_gain_per_sale_and_lots ;
+    # sans ce bundle, on refrait tout le SQL + plafonds lots (≈630–811) + ventes + filets — risque de coût
+    # CPU et d’écarts flottants. Ici le premier _ensure_wallet_hifo remplit le cache ; sync lit une copie.
+    _hifo_recalc_bundle_tok = _hifo_initial_load_bundle.set({})
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            if wallet:
+            if w_filter:
                 cursor.execute(
-                    "SELECT id, current_tokens, current_price, current_value, invested_amount, sol_usd_at_buy "
-                    "FROM tokens WHERE wallet_address = ?", (wallet,)
+                    """
+                    SELECT id, wallet_address, current_tokens, current_price, current_value,
+                           invested_amount, sol_usd_at_buy
+                    FROM tokens WHERE wallet_address = ?
+                    """,
+                    (w_filter,),
                 )
             else:
                 cursor.execute(
-                    "SELECT id, current_tokens, current_price, current_value, invested_amount, sol_usd_at_buy "
-                    "FROM tokens"
+                    """
+                    SELECT id, wallet_address, current_tokens, current_price, current_value,
+                           invested_amount, sol_usd_at_buy
+                    FROM tokens
+                    """
                 )
             tokens = cursor.fetchall()
 
             recalculated = 0
             details = []
 
-            for token in tokens:
-                token_id          = token["id"]
-                current_value_usd = token["current_value"] or (token["current_tokens"] * token["current_price"]) if token["current_price"] else 0
-
-                # ── Lots d'achat HIFO (prix décroissant, puis chronologique) ──────
-                cursor.execute("""
-                    SELECT purchase_timestamp, purchase_date, COALESCE(purchase_slot, 0) as purchase_slot,
-                           tokens_bought, sol_spent,
-                           COALESCE(NULLIF(sol_usd_at_buy, 0), ?) as sol_rate_buy
-                    FROM purchases
-                    WHERE token_id = ? AND tokens_bought > 0 AND sol_spent > 0
-                    ORDER BY (sol_spent / tokens_bought) * COALESCE(NULLIF(sol_usd_at_buy, 0), ?) DESC,
-                             purchase_timestamp ASC
-                """, (sol_usd, token_id, sol_usd))
-                purchase_lots = [dict(r) for r in cursor.fetchall()]
-                for lot in purchase_lots:
-                    lot["remaining"] = lot["tokens_bought"]
-                    lot["ts"] = _lot_ts_for_hifo(lot.get("purchase_timestamp"), lot.get("purchase_date"))
-                    lot["slot"] = lot.get("purchase_slot", 0) or 0
-                    lot["price_usd"] = (
-                        (lot["sol_spent"] / lot["tokens_bought"]) * lot["sol_rate_buy"]
-                        if lot["tokens_bought"] else 0
-                    )
-
-                # ── Ventes chronologiques ─────────────────────────────────────────
-                cursor.execute("""
-                    SELECT tokens_sold, sol_received,
-                           COALESCE(sale_timestamp, 0) as sale_ts,
-                           COALESCE(sale_slot, 0) as sale_slot,
-                           sale_date,
-                           COALESCE(NULLIF(sol_usd_at_sale, 0), ?) as sol_rate_sell,
-                           id as sale_id
-                    FROM sales WHERE token_id = ?
-                    ORDER BY COALESCE(sale_timestamp, 0) ASC
-                """, (sol_usd, token_id))
-                token_sales = [dict(r) for r in cursor.fetchall()]
-
-                realized_cost_usd = 0.0
-                sales_usd         = 0.0
-                for s in token_sales:
-                    tokens_left = s["tokens_sold"]
-                    sale_ts_c = _sale_ts_ceiling_for_hifo(s.get("sale_ts"), s.get("sale_date"))
-                    sale_slot   = _row_get(s, "sale_slot", 0) or 0
-                    sales_usd  += (s["sol_received"] or 0) * s["sol_rate_sell"]
-
-                    eligible = sorted(
-                        [l for l in purchase_lots
-                         if _lot_eligible_for_sale(l["ts"], l.get("slot", 0), sale_ts_c, sale_slot)],
-                        key=lambda l: l["price_usd"], reverse=True
-                    )
-                    for lot in eligible:
-                        if tokens_left <= 0:
-                            break
-                        consume = min(lot["remaining"], tokens_left)
-                        ratio   = consume / lot["tokens_bought"] if lot["tokens_bought"] else 0
-                        realized_cost_usd += lot["sol_spent"] * ratio * lot["sol_rate_buy"]
-                        lot["remaining"]  -= consume
-                        tokens_left       -= consume
-
-                # ── Coût total vs coût vendu → coût restant ───────────────────────
-                if purchase_lots:
-                    total_invested_usd_token = sum(
-                        l["sol_spent"] * l["sol_rate_buy"] for l in purchase_lots
-                    )
-                else:
-                    # Fallback CMP (tokens manuels sans table purchases)
-                    inv_amt    = token["invested_amount"] or 0
-                    sol_at_buy = token["sol_usd_at_buy"]
-                    total_invested_usd_token = inv_amt * sol_at_buy if sol_at_buy else inv_amt
-
-                total_value_usd = current_value_usd + sales_usd
-                profit_loss     = total_value_usd - total_invested_usd_token
-                gain            = max(0.0, profit_loss)
-                loss            = abs(min(0.0, profit_loss))
-
-                cursor.execute("""
-                    UPDATE tokens SET gain=?, loss=?, updated_at=CURRENT_TIMESTAMP
-                    WHERE id=?
-                """, (gain, loss, token_id))
-
-                details.append({
-                    "token_id":       token_id,
-                    "invested_usd":   round(total_invested_usd_token, 4),
-                    "realized_cost":  round(realized_cost_usd, 4),
-                    "current_value":  round(current_value_usd, 4),
-                    "sales_usd":      round(sales_usd, 4),
-                    "gain":           round(gain, 4),
-                    "loss":           round(loss, 4),
-                })
-                recalculated += 1
-
-            if wallet:
-                _persist_wallet_hifo(conn, wallet, sol_usd)
+            if w_filter:
+                wallets_for_persist = [w_filter]
             else:
                 c2 = conn.cursor()
                 c2.execute(
                     """
                     SELECT DISTINCT wallet_address FROM tokens
                     WHERE wallet_address IS NOT NULL AND TRIM(wallet_address) != ''
+                      AND LENGTH(TRIM(wallet_address)) >= 20
                       AND (
                         EXISTS (SELECT 1 FROM sales s WHERE s.token_id = tokens.id)
                         OR EXISTS (SELECT 1 FROM purchases p WHERE p.token_id = tokens.id)
+                        OR (
+                            NOT EXISTS (SELECT 1 FROM purchases p WHERE p.token_id = tokens.id)
+                            AND COALESCE(tokens.purchased_tokens, 0) > 0
+                            AND COALESCE(tokens.invested_amount, 0) > 0
+                        )
                       )
                     """
                 )
-                for row in c2.fetchall():
-                    wa = row["wallet_address"]
-                    if wa:
-                        _persist_wallet_hifo(conn, str(wa).strip(), sol_usd)
+                wallets_for_persist = [
+                    str(r["wallet_address"]).strip()
+                    for r in c2.fetchall()
+                    if r["wallet_address"]
+                ]
+
+            # Tout vient de _hifo_gain_per_sale_and_lots (merge doublons, caps Σ lots ~630–811, ventes HIFO,
+            # filets buy_usd, repair, _hifo_reconcile_lots_remaining_usd_scale). Ne pas recopier les caps ici.
+            hifo_by_wallet: dict[str, tuple[dict, dict]] = {}
+            sale_ids_by_wallet: dict[str, dict[int, list[int]]] = {}
+
+            def _ensure_wallet_hifo(w_addr: str) -> tuple[dict, dict]:
+                w_addr = (w_addr or "").strip()
+                if not w_addr:
+                    return {}, {}
+                if w_addr not in hifo_by_wallet:
+                    g, lots = _hifo_gain_per_sale_and_lots(cursor, w_addr, sol_usd)
+                    hifo_by_wallet[w_addr] = (g, lots)
+                    c_m = conn.cursor()
+                    c_m.execute(
+                        """
+                        SELECT s.id, s.token_id
+                        FROM sales s
+                        INNER JOIN tokens t ON s.token_id = t.id
+                        WHERE t.wallet_address = ?
+                        """,
+                        (w_addr,),
+                    )
+                    by_tid: dict[int, list[int]] = defaultdict(list)
+                    for r in c_m.fetchall():
+                        by_tid[int(r["token_id"])].append(int(r["id"]))
+                    sale_ids_by_wallet[w_addr] = by_tid
+                return hifo_by_wallet[w_addr]
+
+            for token in tokens:
+                token = dict(token)
+                token_id = int(token["id"])
+                wkey = (token.get("wallet_address") or "").strip()
+                ct = float(token.get("current_tokens") or 0)
+                cp = float(token.get("current_price") or 0)
+                cv = token.get("current_value")
+                current_value_usd = float(cv) if cv is not None else (ct * cp if cp else 0.0)
+
+                realized_pnl_usd = 0.0
+                if len(wkey) >= 20:
+                    g, lots = _ensure_wallet_hifo(wkey)
+                    sids = sale_ids_by_wallet[wkey].get(token_id, [])
+                    realized_cost_usd = 0.0
+                    sales_usd_sum = 0.0
+                    for sid in sids:
+                        row = g.get(sid)
+                        if not row:
+                            continue
+                        sales_usd_sum += float(row.get("sell_usd") or 0)
+                        bu = row.get("buy_usd")
+                        if bu is not None:
+                            realized_cost_usd += float(bu)
+                        pn = row.get("pnl_usd")
+                        if pn is not None:
+                            realized_pnl_usd += float(pn)
+                    remaining_basis_usd = _hifo_remaining_cost_usd(lots, token_id)
+                    sum_lot_rem = sum(
+                        float(l.get("remaining") or 0) for l in (lots.get(token_id) or [])
+                    )
+                    if (
+                        sum_lot_rem > 1e-12
+                        and ct > 1e-12
+                        and abs(sum_lot_rem - ct) > max(1e-9, 1e-6 * max(ct, 1.0))
+                    ):
+                        remaining_basis_usd *= ct / sum_lot_rem
+                    total_invested_usd_token = realized_cost_usd + remaining_basis_usd
+                else:
+                    realized_cost_usd = 0.0
+                    sales_usd_sum = 0.0
+                    remaining_basis_usd = 0.0
+                    inv_amt = float(token.get("invested_amount") or 0)
+                    sol_at_buy = token.get("sol_usd_at_buy")
+                    total_invested_usd_token = (
+                        inv_amt * float(sol_at_buy) if sol_at_buy else inv_amt
+                    )
+                    cursor.execute(
+                        """
+                        SELECT COALESCE(SUM(s.sol_received * COALESCE(NULLIF(s.sol_usd_at_sale, 0), ?)), 0)
+                        FROM sales s WHERE s.token_id = ?
+                        """,
+                        (sol_usd, token_id),
+                    )
+                    r_s = cursor.fetchone()
+                    sales_usd_sum = float((r_s[0] if r_s else 0) or 0)
+
+                total_value_usd = current_value_usd + sales_usd_sum
+                profit_loss = total_value_usd - total_invested_usd_token
+                gain = max(0.0, profit_loss)
+                loss = abs(min(0.0, profit_loss))
+
+                # Pas d’UPDATE gain/loss ici si wallet Solana valide : _sync_tokens_gain_loss_hifo_for_wallets
+                # réécrit avec le P/L latent seul (même règle que le dashboard). Orphelins / wallet invalide : on garde ce snapshot vie-position.
+                if len(wkey) < 20:
+                    cursor.execute(
+                        """
+                        UPDATE tokens SET gain=?, loss=?, updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """,
+                        (gain, loss, token_id),
+                    )
+
+                details.append(
+                    {
+                        "token_id": token_id,
+                        "invested_usd": round(total_invested_usd_token, 4),
+                        "realized_cost": round(realized_cost_usd, 4),
+                        "remaining_basis_usd": round(remaining_basis_usd, 4),
+                        "realized_pnl_usd": round(realized_pnl_usd, 4),
+                        "current_value": round(current_value_usd, 4),
+                        "sales_usd": round(sales_usd_sum, 4),
+                        "gain": round(gain, 4),
+                        "loss": round(loss, 4),
+                    }
+                )
+                recalculated += 1
+
+            for wp in wallets_for_persist:
+                g_p, _ = _ensure_wallet_hifo(wp)
+                _persist_wallet_hifo(conn, wp, sol_usd, gain_per_sale=g_p)
 
             conn.commit()
-            if wallet:
-                _sync_tokens_gain_loss_hifo_for_wallets(conn, sol_usd, [str(wallet).strip()])
+            if w_filter:
+                _sync_tokens_gain_loss_hifo_for_wallets(conn, sol_usd, [w_filter])
             else:
                 c_sync = conn.cursor()
                 c_sync.execute(
@@ -4985,11 +5125,11 @@ async def recalculate_history(wallet: Optional[str] = Query(None)):
                 ]
                 _sync_tokens_gain_loss_hifo_for_wallets(conn, sol_usd, wl)
 
-        if wallet:
-            _invalidate_dashboard_cache(wallet)
+        if w_filter:
+            _invalidate_dashboard_cache(w_filter)
             try:
                 with get_db() as snap_conn:
-                    _record_wallet_pnl_snapshot(snap_conn, str(wallet).strip(), sol_usd, force=True)
+                    _record_wallet_pnl_snapshot(snap_conn, w_filter, sol_usd, force=True)
             except Exception as e:
                 print(f"[!] Snapshot P/L après HIFO: {e}")
         else:
@@ -5011,12 +5151,15 @@ async def recalculate_history(wallet: Optional[str] = Query(None)):
                 print(f"[!] Snapshots P/L globaux: {e}")
 
         return {
-            "message":      f"{recalculated} tokens recalculés (HIFO chronologique)",
-            "recalculated": recalculated,
-            "details":      details,
+            "message":          f"{recalculated} tokens recalculés (HIFO chronologique)",
+            "recalculated":     recalculated,
+            "details":          details,
+            "details_legend":   RECALCULATE_HISTORY_DETAILS_LEGEND,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur recalcul HIFO : {str(e)}")
+    finally:
+        _hifo_initial_load_bundle.reset(_hifo_recalc_bundle_tok)
 
 # Historique des prix pour graphiques
 @app.get("/api/history/{token_id}")
