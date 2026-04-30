@@ -175,3 +175,92 @@ def test_dashboard_realized_matches_manual_sum_after_multi_token():
     assert pytest.approx(rg, rel=1e-5) == rg_d
     assert pytest.approx(rl, rel=1e-5) == rl_d
     conn.close()
+
+
+def test_hifo_uses_token_buy_rate_when_purchase_rate_missing():
+    """Si purchase.sol_usd_at_buy manque, utiliser tokens.sol_usd_at_buy (pas le SOL spot actuel)."""
+    wallet = "14141414141414141414141414141414"
+    mint = "Mint1414141414141414141414141414141414141414"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (
+            id, name, address, wallet_address, current_tokens, current_value, current_price,
+            invested_amount, purchased_tokens, sol_usd_at_buy
+        )
+        VALUES (1, 'Z', ?, ?, 0, 0, 0, 0.59, 100, 100.0)
+        """,
+        (mint, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO purchases (
+            id, token_id, wallet_address, purchase_timestamp, tokens_bought,
+            sol_spent, sol_usd_at_buy, purchase_date, transaction_signature
+        )
+        VALUES (1, 1, ?, 100, 100, 0.59, NULL, '2024-01-01', 'p1')
+        """,
+        (wallet,),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (
+            id, token_id, tokens_sold, sol_received, sol_usd_at_sale,
+            sale_timestamp, sale_date, transaction_signature
+        )
+        VALUES (1, 1, 100, 0.58, 100.0, 200, '2024-01-02', 's1')
+        """,
+    )
+    conn.commit()
+
+    # Prix spot volontairement plus élevé : avant fix, le coût pouvait être surévalué (~0.59*130=76.7$).
+    gain = m._compute_hifo_gain_per_sale(c, wallet, 130.0)
+    row = gain[1]
+    assert pytest.approx(58.0, rel=1e-6) == float(row["sell_usd"])
+    assert pytest.approx(59.0, rel=1e-6) == float(row["buy_usd"])
+    assert pytest.approx(-1.0, rel=1e-6) == float(row["pnl_usd"])
+    conn.close()
+
+
+def test_hifo_prefers_exact_remaining_lot_for_round_trip():
+    """Vente ~= reliquat d'un lot : prioriser ce lot pour éviter un coût artificiellement éloigné."""
+    wallet = "15151515151515151515151515151515"
+    mint = "Mint1515151515151515151515151515151515151515"
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _mk_schema(conn)
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO tokens (id, name, address, wallet_address, current_tokens, current_value, current_price)
+        VALUES (1, 'R', ?, ?, 0, 0, 0)
+        """,
+        (mint, wallet),
+    )
+    # Lot ancien plus cher + lot récent dont le reliquat matche exactement la vente.
+    c.execute(
+        """
+        INSERT INTO purchases (id, token_id, wallet_address, purchase_timestamp, tokens_bought, sol_spent, sol_usd_at_buy, purchase_date, transaction_signature)
+        VALUES
+            (1, 1, ?, 100, 100, 0.7, 100.0, '2024-01-01', 'old-expensive'),
+            (2, 1, ?, 200, 100, 0.59, 100.0, '2024-01-02', 'recent-match')
+        """,
+        (wallet, wallet),
+    )
+    c.execute(
+        """
+        INSERT INTO sales (id, token_id, tokens_sold, sol_received, sol_usd_at_sale, sale_timestamp, sale_date, transaction_signature)
+        VALUES (1, 1, 100, 0.58, 100.0, 300, '2024-01-03', 's1')
+        """,
+    )
+    conn.commit()
+
+    gain = m._compute_hifo_gain_per_sale(c, wallet, 100.0)
+    row = gain[1]
+    assert pytest.approx(58.0, rel=1e-6) == float(row["sell_usd"])
+    assert pytest.approx(59.0, rel=1e-6) == float(row["buy_usd"])
+    assert pytest.approx(-1.0, rel=1e-6) == float(row["pnl_usd"])
+    conn.close()

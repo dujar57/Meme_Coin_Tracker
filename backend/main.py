@@ -547,7 +547,7 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         f"""
                 SELECT p.token_id, p.purchase_timestamp, COALESCE(p.purchase_slot, 0) as purchase_slot,
                        p.tokens_bought, p.sol_spent,
-                       COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?) as sol_rate_buy,
+                       COALESCE(NULLIF(p.sol_usd_at_buy, 0), NULLIF(t.sol_usd_at_buy, 0), ?) as sol_rate_buy,
                        p.purchase_date as purchase_date,
                        'helius' as source,
                        COALESCE(TRIM(p.transaction_signature), '') as tx_sig
@@ -653,7 +653,9 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
         SELECT x.token_id, COALESCE(SUM(x.sig_usd), 0) AS capu
         FROM (
             SELECT p.token_id,
-                   SUM(p.sol_spent * COALESCE(NULLIF(p.sol_usd_at_buy, 0), ?)) AS sig_usd
+                   SUM(
+                       p.sol_spent * COALESCE(NULLIF(p.sol_usd_at_buy, 0), NULLIF(t.sol_usd_at_buy, 0), ?)
+                   ) AS sig_usd
             FROM purchases p
             INNER JOIN tokens t ON p.token_id = t.id
             WHERE t.wallet_address = ? AND p.tokens_bought > 0 AND p.sol_spent > 0
@@ -847,6 +849,14 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             key=lambda l: l["price_usd"],
             reverse=True,
         )
+        # Si une vente correspond quasi exactement au reliquat d'un lot, prioriser ce lot.
+        # Cela évite des écarts artificiels sur les "round-trips" (achat X tokens puis revente de ~X tokens).
+        if tokens_sold > 0 and len(eligible) > 1:
+            eps = max(1e-9, float(tokens_sold) * 0.002)
+            exact_candidates = [l for l in eligible if abs(float(l.get("remaining") or 0) - float(tokens_sold)) <= eps]
+            if exact_candidates:
+                exact_lot = max(exact_candidates, key=lambda l: int(l.get("ts") or 0))
+                eligible = [exact_lot] + [l for l in eligible if l is not exact_lot]
         buy_usd_cost = 0.0
         tokens_left = tokens_sold
         for lot in eligible:
@@ -907,6 +917,11 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             profit = None
         else:
             profit = sell_usd - buy_usd_cost
+        
+        # 🐛 DEBUG: Afficher les transactions suspectes
+        if abs(profit) > 5:  # Écarts > 5$
+            print(f"[HIFO DEBUG] Sale {sale['sale_id']}: tokens={tokens_sold:.2f}, sell_usd={sell_usd:.2f}, buy_usd={buy_usd_cost:.2f}, profit={profit:.2f}")
+        
         gain_per_sale[sale["sale_id"]] = {
             "sell_usd": round(sell_usd, 4),
             "buy_usd": round(buy_usd_cost, 4),
@@ -936,11 +951,12 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
                 row["buy_usd"] = round(bu, 4)
                 row["pnl_usd"] = round(float(row["sell_usd"]) - row["buy_usd"], 4)
 
-    _repair_gain_per_sale_buy_vs_purchase_caps(
-        gain_per_sale, sells_chrono, _purchase_cap_usd, _bought_tok
-    )
+    # ❌ DÉSACTIVER: Ces corrections causent plus de problèmes qu'elles n'en résolvent
+    # _repair_gain_per_sale_buy_vs_purchase_caps(
+    #     gain_per_sale, sells_chrono, _purchase_cap_usd, _bought_tok
+    # )
 
-    _hifo_reconcile_lots_remaining_usd_scale(gain_per_sale, sells_chrono, lots_by_token)
+    # _hifo_reconcile_lots_remaining_usd_scale(gain_per_sale, sells_chrono, lots_by_token)
 
     if bundle is not None and wkey:
         bundle[(wkey, sol_key)] = (gain_per_sale, lots_by_token)
@@ -4093,6 +4109,7 @@ async def get_wallet_sol_balance(wallet_address: str):
 
 # Cache en mémoire pour les prix historiques SOL (date → float)
 _sol_history_cache: dict[str, float] = {}
+_sol_history_minute_cache: dict[int, float] = {}
 # Limite la concurrence : évite des centaines d’appels Binance/Kraken en parallèle (timeouts / 4+ min).
 _sol_history_fetch_sem = asyncio.Semaphore(16)
 
@@ -4220,6 +4237,83 @@ async def _get_sol_usd_at_date(date_str: str) -> float:
             pass
 
     return 0.0  # inconnu — on ne stocke pas de faux prix
+
+
+async def _get_sol_usd_at_timestamp(ts_unix: int | float | None, date_fallback: str | None = None) -> float:
+    """
+    Prix SOL/USD au plus proche du timestamp (granularité minute), avec fallback journalier.
+    Réduit l'écart avec les explorers (DexScreener) qui valorisent la transaction au moment du swap.
+    """
+    try:
+        ts = int(ts_unix or 0)
+    except (TypeError, ValueError):
+        ts = 0
+    if ts > int(1e12):
+        ts = int(ts / 1000)
+    if ts <= 0:
+        if date_fallback:
+            return await _get_sol_usd_at_date(str(date_fallback))
+        return 0.0
+
+    minute_ts = (ts // 60) * 60
+    if minute_ts in _sol_history_minute_cache:
+        return _sol_history_minute_cache[minute_ts]
+
+    start_ms = minute_ts * 1000
+    end_ms = (minute_ts + 60) * 1000
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        # 1) Binance 1m kline au timestamp exact
+        try:
+            r = await client.get(
+                "https://api.binance.com/api/v3/klines",
+                params={
+                    "symbol": "SOLUSDT",
+                    "interval": "1m",
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                    "limit": 1,
+                },
+            )
+            if r.status_code == 200:
+                rows = r.json() or []
+                if rows:
+                    # Utilise la moyenne OHLC pour limiter les spikes d'une seule clôture minute.
+                    o = float(rows[0][1])
+                    h = float(rows[0][2])
+                    l = float(rows[0][3])
+                    c = float(rows[0][4])
+                    px = (o + h + l + c) / 4.0
+                    if px > 0:
+                        _sol_history_minute_cache[minute_ts] = px
+                        return px
+        except Exception:
+            pass
+
+        # 2) CoinGecko range ±30 min autour de la tx
+        try:
+            frm = max(0, ts - 1800)
+            to = ts + 1800
+            r = await client.get(
+                "https://api.coingecko.com/api/v3/coins/solana/market_chart/range",
+                params={"vs_currency": "usd", "from": frm, "to": to},
+            )
+            if r.status_code == 200:
+                prices = r.json().get("prices") or []
+                if prices:
+                    nearest = min(prices, key=lambda p: abs(int(p[0] / 1000) - ts))
+                    px = float(nearest[1])
+                    if px > 0:
+                        _sol_history_minute_cache[minute_ts] = px
+                        return px
+        except Exception:
+            pass
+
+    # 3) Fallback journalier (logique existante)
+    if date_fallback:
+        return await _get_sol_usd_at_date(str(date_fallback))
+    d = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+    return await _get_sol_usd_at_date(d)
 
 
 async def _get_sol_usd_price() -> float:
@@ -6066,7 +6160,11 @@ async def helius_import_swaps(
                     continue
 
                 # Prix SOL/USD de la date (commun aux deux cas, pré-chargé en parallèle)
-                sol_at_tx = _date_sol_cache.get(tx_date) or sol_usd
+                sol_at_tx = (
+                    await _get_sol_usd_at_timestamp(timestamp_unix, tx_date)
+                    or _date_sol_cache.get(tx_date)
+                    or sol_usd
+                )
 
                 if is_buy:
                     # Dédoublonnage (sans repair : un 2e import ne corrige pas les montants déjà en BDD)
@@ -6359,7 +6457,10 @@ async def helius_import_swaps(
 
 # ── Backfill : remplir sol_usd_at_sale pour les ventes sans prix historique ──
 @app.post("/api/backfill-sol-prices")
-async def backfill_sol_prices():
+async def backfill_sol_prices(
+    wallet: Optional[str] = Query(None),
+    force: bool = Query(False, description="Repricer aussi les ventes déjà valorisées."),
+):
     """
     Pour chaque vente en BDD qui n'a pas de sol_usd_at_sale,
     récupère le prix SOL/USD historique via CoinGecko et le stocke.
@@ -6381,10 +6482,29 @@ async def backfill_sol_prices():
         except sqlite3.OperationalError:
             pass
 
-        cursor.execute("""
-            SELECT id, sale_date FROM sales
-            WHERE (sol_usd_at_sale IS NULL OR sol_usd_at_sale = 0) AND sale_date IS NOT NULL
-        """)
+        w = (wallet or "").strip()
+        if w:
+            cursor.execute(
+                """
+                SELECT s.id, s.sale_date, s.sale_timestamp
+                FROM sales s
+                INNER JOIN tokens t ON t.id = s.token_id
+                WHERE t.wallet_address = ?
+                  AND s.sale_date IS NOT NULL
+                  AND (? = 1 OR COALESCE(s.sol_usd_at_sale, 0) = 0)
+                """,
+                (w, 1 if force else 0),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, sale_date, sale_timestamp
+                FROM sales
+                WHERE sale_date IS NOT NULL
+                  AND (? = 1 OR COALESCE(sol_usd_at_sale, 0) = 0)
+                """,
+                (1 if force else 0,),
+            )
         rows = cursor.fetchall()
 
     updated = 0
@@ -6395,12 +6515,14 @@ async def backfill_sol_prices():
         sale_date = row["sale_date"]
         if not sale_date:
             continue
-        if sale_date not in date_cache:
-            import asyncio
-            await asyncio.sleep(1.5)  # 1,5s entre chaque appel pour respecter la limite CoinGecko (50/min)
-            price = await _get_sol_usd_at_date(sale_date)
-            date_cache[sale_date] = price
-        price = date_cache[sale_date]
+        sale_ts = row["sale_timestamp"] if "sale_timestamp" in row.keys() else None
+        if sale_ts:
+            price = await _get_sol_usd_at_timestamp(sale_ts, sale_date)
+        else:
+            if sale_date not in date_cache:
+                price = await _get_sol_usd_at_date(sale_date)
+                date_cache[sale_date] = price
+            price = date_cache[sale_date]
         if price and price > 0:
             with get_db() as conn:
                 conn.execute(
