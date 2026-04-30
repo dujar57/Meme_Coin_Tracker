@@ -631,6 +631,12 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
 
     _merge_hifo_lots_duplicate_tx_signatures(lots_by_token)
 
+    # ✅ FIX: Nettoyer les flags de capping de toute session précédente
+    # pour éviter que le factor soit appliqué 2x si les lots sont réutilisés du cache
+    for _tid, lots_list in lots_by_token.items():
+        for lot in lots_list:
+            lot.pop("_capping_applied_session", None)
+
     lot_usd_before_cap: dict[int, float] = {
         int(tid): sum(
             float(l.get("sol_spent") or 0) * float(l.get("sol_rate_buy") or 0) for l in lots
@@ -806,7 +812,11 @@ def _hifo_gain_per_sale_and_lots(cursor, wallet: str, sol_usd: float) -> tuple[d
             continue
         factor = cap / lot_total if lot_total > 0 else 1.0
         for l in _lots:
-            l["sol_spent"] = float(l.get("sol_spent") or 0) * factor
+            # ✅ FIX: Appliquer le factor UNE SEULE FOIS par lot
+            # (les lots du cache peuvent être réutilisés; marquer qu'ils sont déjà cappés)
+            if "_capping_applied_session" not in l:
+                l["sol_spent"] = float(l.get("sol_spent") or 0) * factor
+                l["_capping_applied_session"] = True
             tb = float(l.get("tokens_total") or 0)
             l["price_usd"] = (
                 (l["sol_spent"] / tb) * float(l.get("sol_rate_buy") or 0) if tb > 0 else 0.0
